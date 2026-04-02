@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.pytest_cache/
+
+# Project related docs and output (Excluding from repo)
+ocpp201_std_doc/
+output_docs/
+outputs/
+tmp_*
+test_out.txt
+parsed_docs.md
+.gemini/

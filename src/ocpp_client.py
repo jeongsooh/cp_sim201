@@ -32,8 +32,7 @@ class OCPPClient:
         self._schemas = self._load_schemas()
 
     def _load_schemas(self) -> Dict[str, dict]:
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        schema_dir = os.path.join(base_dir, "ocpp201_std_doc", "OCPP-2.0.1_part3_JSON_schemas")
+        schema_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schemas")
         schemas = {}
         if not os.path.isdir(schema_dir):
             logger.warning(f"Schema directory not found: {schema_dir}")

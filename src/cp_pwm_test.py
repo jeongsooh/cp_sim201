@@ -19,11 +19,15 @@ def setup_pwm(chip, channel=0):
 def set_pwm(chip, channel, period_ns, duty_ns):
     pwm_dir = f"/sys/class/pwm/{chip}/pwm{channel}"
     try:
-        # Duty cycle must always be <= period, so to be safe: 
-        # When shrinking period, shrink duty first. When expanding, expand period first.
-        # But here we just set them to absolute values, so we zero out duty first.
-        with open(f"{pwm_dir}/duty_cycle", "w") as f:
-            f.write("0")
+        with open(f"{pwm_dir}/duty_cycle", "r") as f:
+            curr_duty = int(f.read().strip())
+            
+        # Linux sysfs kernel constraints: duty_cycle cannot exceed period.
+        # If current duty is greater than the TARGET period, it would clash when writing period.
+        # So we temporarily zero the duty cycle first.
+        if curr_duty > period_ns:
+            with open(f"{pwm_dir}/duty_cycle", "w") as f:
+                f.write("0")
         
         with open(f"{pwm_dir}/period", "w") as f:
             f.write(str(period_ns))

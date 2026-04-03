@@ -23,13 +23,13 @@ class STM32HardwareAPI(HardwareAPI):
 
         try:
             # Relay 1 Setup (PK1)
-            self.chip_relay = gpiod.Chip("gpiochip10")
+            self.chip_relay = gpiod.Chip("/dev/gpiochip10")
             self.line_relay = self.chip_relay.get_line(1)
             self.line_relay.request(consumer="CP700P_Charger", type=gpiod.LINE_REQ_DIR_OUT)
             self.line_relay.set_value(0) # Open initially (Power OFF)
             
             # Proximity Setup (PI3)
-            self.chip_prox = gpiod.Chip("gpiochip8")
+            self.chip_prox = gpiod.Chip("/dev/gpiochip8")
             self.line_prox = self.chip_prox.get_line(3)
             self.line_prox.request(consumer="CP700P_Charger", type=gpiod.LINE_REQ_DIR_IN)
         except AttributeError as ae:

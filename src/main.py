@@ -20,16 +20,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MAIN")
 
+def blocking_read_rfid(ser) -> str:
+    """Reads bytes from serial port robustly and cleans them."""
+    try:
+        if ser and ser.in_waiting > 0:
+            data = ser.read(ser.in_waiting)
+            raw_str = data.decode('utf-8', errors='ignore').strip()
+            # Clean up hex output by retaining only alphanumeric characters
+            clean_token = ''.join(c for c in raw_str if c.isalnum())
+            return clean_token
+    except Exception as e:
+        logger.error(f"Serial read error: {e}")
+    return ""
+
 async def rfid_monitor(controller: ChargingStationController):
     """
     Background daemon to read RFID scans via /dev/ttySTM1 UART asynchronously.
     """
-    logger.info("Starting RFID UART monitor on /dev/ttySTM1 (Placeholder loop)")
-    # TODO: Implement real async pyserial read flow here.
+    port = "/dev/ttySTM1"
+    baudrate = 9600
+    logger.info(f"Starting RFID UART monitor on {port} (Baud: {baudrate})")
+    
+    try:
+        import serial
+        ser = serial.Serial(port, baudrate, timeout=1)
+    except ImportError:
+        logger.error("pyserial is not installed! Run: pip install pyserial")
+        return
+    except Exception as e:
+        logger.error(f"Failed to open RFID Serial Port {port}: {e}")
+        logger.warning("RFID monitor cannot start hardware loop.")
+        ser = None
+
     while True:
-        await asyncio.sleep(5)
-        # Uncomment and modify string below to simulate or trigger a real scan
-        # await controller.handle_rfid_scan("A1B2C3D4")
+        await asyncio.sleep(0.5) # Poll interval
+        if ser:
+            uid = await asyncio.to_thread(blocking_read_rfid, ser)
+            if uid:
+                logger.info(f"=====================================")
+                logger.info(f"   RFID TAG SCANNED: [{uid}]")
+                logger.info(f"=====================================")
+                # Handles AuthorizeRequest internally and triggers 
+                # a transaction if accepted by CSMS and connector is plugged.
+                await controller.handle_rfid_scan(uid)
 
 async def proximity_monitor(controller: ChargingStationController):
     """

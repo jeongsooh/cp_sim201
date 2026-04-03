@@ -52,9 +52,9 @@ def main():
     
     for chip in chips:
         if os.path.exists(f"/sys/class/pwm/{chip}"):
-            if setup_pwm(chip):
+            if setup_pwm(chip, channel=2):
                 active_chips.append(chip)
-                print(f"[OK] {chip} is ready.")
+                print(f"[OK] {chip} Channel 2 (TIMx_CH3) is ready.")
         else:
             print(f"[--] {chip} not found.")
 
@@ -62,8 +62,8 @@ def main():
         print("[!] No hardware PWM chips found. Exiting.")
         sys.exit(1)
 
-    print("\n[INFO] Both active chips will mirror the identical PWM settings.")
-    print("[INFO] Please attach your Oscilloscope/Multimeter to the CP Pin.")
+    print("\n[INFO] Both active chips will mirror the identical PWM settings on Channel 2.")
+    print("[INFO] Please attach your Oscilloscope/Multimeter to the CP Pin (PB10).")
     print("[INFO] The period is permanently locked to 1 kHz (1,000,000 ns).\n")
 
     PERIOD_NS = 1000000
@@ -85,9 +85,9 @@ def main():
             duty_ns = int(PERIOD_NS * (duty_percent / 100.0))
             
             for chip in active_chips:
-                success = set_pwm(chip, 0, PERIOD_NS, duty_ns)
+                success = set_pwm(chip, 2, PERIOD_NS, duty_ns)
                 if success:
-                    print(f" -> {chip} Output: 1kHz @ {duty_percent}% Duty ({duty_ns}ns)")
+                    print(f" -> {chip} Ch2 Output: 1kHz @ {duty_percent}% Duty ({duty_ns}ns)")
                     
     except KeyboardInterrupt:
         pass

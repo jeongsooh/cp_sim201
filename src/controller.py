@@ -21,6 +21,7 @@ class ChargingStationController:
         self.is_authorized: bool = False
         self.transaction_id: str | None = None
         self.meter_value: float = 0.0
+        self._state_c_active: bool = False
         
         self._heartbeat_task = None
         self._meter_task = None
@@ -127,6 +128,7 @@ class ChargingStationController:
             if not self.transaction_id:
                 self.transaction_id = str(uuid.uuid4())
                 self.meter_value = 0.0
+                self._state_c_active = False
                 payload = {
                     "eventType": "Started",
                     "timestamp": "2026-04-02T12:05:00Z",
@@ -141,14 +143,36 @@ class ChargingStationController:
                 }
                 await self.ocpp_client.call("TransactionEvent", payload)
                 self.power_contactor_hal.control_relay("Close")
+                # Drop to 53% PWM (32 Amps continuous limit) to allow vehicle onboard charger to pull power
+                self.power_contactor_hal.set_pwm_duty(53)
                 
                 if self._meter_task:
                     self._meter_task.cancel()
                 self._meter_task = asyncio.create_task(self._meter_values_loop(self.transaction_id))
 
+    async def handle_state_c(self):
+        """Called by main.py ADC monitor when CP voltage drops to +6V (< 40000 ADC)"""
+        if self.transaction_id and not self._state_c_active:
+            self._state_c_active = True
+            logger.info("Control Pilot dropped to State C (+6V). EV is Charging!")
+            payload = {
+                "eventType": "Updated",
+                "timestamp": "2026-04-02T12:05:01Z",
+                "triggerReason": "ChargingStateChanged",
+                "seqNo": 1,
+                "transactionInfo": {
+                    "transactionId": self.transaction_id,
+                    "chargingState": "Charging"
+                }
+            }
+            await self.ocpp_client.call("TransactionEvent", payload)
+
     async def stop_transaction(self, stopped_reason: str = "Local"):
         if self.transaction_id:
             self.power_contactor_hal.control_relay("Open")
+            # Restore 100% PWM (+12V Standing State)
+            self.power_contactor_hal.set_pwm_duty(100)
+            
             if self._meter_task:
                 self._meter_task.cancel()
             payload = {
@@ -167,6 +191,7 @@ class ChargingStationController:
             await self.ocpp_client.call("TransactionEvent", payload)
             self.transaction_id = None
             self.is_authorized = False
+            self._state_c_active = False
 
     # ==========================================
     # Phase 6: Security and Certificates (TC_A_*)

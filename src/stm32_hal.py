@@ -45,7 +45,60 @@ class STM32HardwareAPI(HardwareAPI):
             logger.error(f"Failed to initialize gpiod v2 lines: {e}")
         
         # Serial RFID Interface placeholder
-        self.rfid_serial_port = "/dev/ttySTM1"
+        self.rfid_serial_port = "/dev/ttySTM6"
+        
+        self._init_cp_pwm()
+
+    def _init_cp_pwm(self):
+        """1kHz PWM 100% (State A/B Standby) 초기화"""
+        self.pwm_chip = "pwmchip0"
+        self.pwm_chan = "2" # TIM2_CH3 PB10
+        self.pwm_dir = f"/sys/class/pwm/{self.pwm_chip}/pwm{self.pwm_chan}"
+        self.period_ns = 1000000 # 1kHz
+        
+        import os
+        if not os.path.exists(self.pwm_dir):
+            try:
+                with open(f"/sys/class/pwm/{self.pwm_chip}/export", "w") as f:
+                    f.write(self.pwm_chan)
+                import time; time.sleep(0.1)
+            except Exception as e:
+                logger.warning(f"Failed to export CP PWM: {e}")
+                
+        # Default 100% (DC)
+        self.set_cp_pwm(1, 100)
+
+    def set_cp_pwm(self, evse_id: int, duty_percent: int):
+        """Control Pilot PWM 실시간 변경"""
+        import os
+        if evse_id != 1 or not os.path.exists(self.pwm_dir): 
+            return
+            
+        duty_ns = int(self.period_ns * (max(0, min(100, duty_percent)) / 100.0))
+        try:
+            with open(f"{self.pwm_dir}/duty_cycle", "r") as f:
+                curr_duty = int(f.read().strip())
+            
+            if curr_duty > self.period_ns:
+                with open(f"{self.pwm_dir}/duty_cycle", "w") as f: f.write("0")
+                
+            with open(f"{self.pwm_dir}/period", "w") as f: f.write(str(self.period_ns))
+            with open(f"{self.pwm_dir}/duty_cycle", "w") as f: f.write(str(duty_ns))
+            with open(f"{self.pwm_dir}/enable", "w") as f: f.write("1")
+        except Exception as e:
+            logger.error(f"Failed to set CP PWM: {e}")
+
+    def read_cp_adc(self, evse_id: int) -> int:
+        """Reads CP Voltage from STM32 IIO ADC Channel 0"""
+        if evse_id != 1: return 0
+        adc_path = "/sys/bus/iio/devices/iio:device2/in_voltage0_raw"
+        import os
+        if not os.path.exists(adc_path): return 0
+        try:
+            with open(adc_path, "r") as f:
+                return int(f.read().strip())
+        except Exception as e:
+            return 0
 
     def read_physical_connection(self) -> str:
         """Reads physical sensor to determine if cable is Available or Occupied"""

@@ -95,6 +95,23 @@ async def proximity_monitor(controller: ChargingStationController):
         # Debounce/Poll delay
         await asyncio.sleep(1)
 
+async def cp_adc_monitor(controller: ChargingStationController):
+    """
+    Background daemon to scan ADC Channel 0 for State C transitions (+6V).
+    State A: ~53000 | State B: ~45000 | State C: ~36500
+    """
+    logger.info("Starting CP ADC monitor daemon (Polling in_voltage0_raw)")
+    state_c_threshold = 40000
+    
+    while True:
+        adc_val = controller.connector_hal.read_cp_voltage()
+        # If ADC is valid and drops below 40k, EV is pulling power (State C)
+        if 0 < adc_val < state_c_threshold:
+            if controller.transaction_id and not getattr(controller, "_state_c_active", False):
+                await controller.handle_state_c()
+                
+        await asyncio.sleep(0.5)
+
 async def main():
     logger.info("========================================")
     logger.info("   STM32MP1 CP700P EV Charger daemon    ")
@@ -120,11 +137,12 @@ async def main():
     # 4. Spin up hardware reading mechanisms
     rfid_task = asyncio.create_task(rfid_monitor(controller))
     prox_task = asyncio.create_task(proximity_monitor(controller))
+    adc_task  = asyncio.create_task(cp_adc_monitor(controller))
 
     logger.info("System is live and listening for hardware events.")
 
     # Block indefinitely
-    await asyncio.gather(client_task, rfid_task, prox_task)
+    await asyncio.gather(client_task, rfid_task, prox_task, adc_task)
 
 if __name__ == "__main__":
     try:

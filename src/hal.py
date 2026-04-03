@@ -28,6 +28,16 @@ class HardwareAPI:
         # 릴레이 전원 차단 (MC Open)
         pass
 
+    @staticmethod
+    def set_cp_pwm(evse_id: int, duty_percent: int):
+        # Control Pilot PWM 동적 제어
+        pass
+        
+    @staticmethod
+    def read_cp_adc(evse_id: int) -> int:
+        # Control Pilot ADC raw measurement 측정
+        return 0
+
 
 class ConnectorHAL:
     def __init__(self, evse_id: int, connector_id: int, ocpp_client=None):
@@ -103,3 +113,11 @@ class PowerContactorHAL:
     def get_actual_active_state(self) -> bool:
         """물리적으로 릴레이 접점이 붙어 전류가 흐를 수 있는지 측정"""
         return HardwareAPI.get_relay_status(self.evse_id)
+
+    def read_cp_voltage(self) -> int:
+        """ADC 측정값으로 State 판별용 (ex. State C = ~36500)"""
+        return HardwareAPI.read_cp_adc(self.evse_id)
+
+    def set_pwm_duty(self, duty_percent: int):
+        HardwareAPI.set_cp_pwm(self.evse_id, duty_percent)
+        logger.info(f"Control Pilot PWM on EVSE {self.evse_id} set to {duty_percent}%")

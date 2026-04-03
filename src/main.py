@@ -20,16 +20,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MAIN")
 
+import time
+
 def blocking_read_rfid(ser) -> str:
     """Reads bytes from serial port robustly and cleans them."""
     try:
         if ser and ser.in_waiting > 0:
+            time.sleep(0.1)  # Allow buffer to fill
             data = ser.read(ser.in_waiting)
-            logger.info(f"Raw UART Bytes (HEX): {data.hex()}")
-            raw_str = data.decode('utf-8', errors='ignore').strip()
-            # Clean up hex output by retaining only alphanumeric characters
-            clean_token = ''.join(c for c in raw_str if c.isalnum())
-            return clean_token
+            raw_hex = data.hex().upper()
+            logger.info(f"Raw UART Bytes (HEX): {raw_hex}")
+            
+            # The RFID module outputs binary/hex instead of ASCII. 
+            # We use the full hex representation as the unique token string.
+            return raw_hex
     except Exception as e:
         logger.error(f"Serial read error: {e}")
     return ""

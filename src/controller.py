@@ -115,7 +115,10 @@ class ChargingStationController:
                     "transactionId": self.transaction_id
                 },
                 "meterValue": [
-                    {"sampledValue": [{"value": self.meter_value}]}
+                    {
+                        "timestamp": "2026-04-02T12:05:00Z",
+                        "sampledValue": [{"value": self.meter_value}]
+                    }
                 ]
             }
             try:
@@ -138,7 +141,10 @@ class ChargingStationController:
                         "transactionId": self.transaction_id
                     },
                     "meterValue": [
-                        {"sampledValue": [{"value": self.meter_value}]}
+                        {
+                            "timestamp": "2026-04-02T12:05:00Z",
+                            "sampledValue": [{"value": self.meter_value}]
+                        }
                     ]
                 }
                 await self.ocpp_client.call("TransactionEvent", payload)
@@ -185,7 +191,10 @@ class ChargingStationController:
                     "stoppedReason": stopped_reason
                 },
                 "meterValue": [
-                    {"sampledValue": [{"value": self.meter_value + 1500.0}]}
+                    {
+                        "timestamp": "2026-04-02T12:15:00Z",
+                        "sampledValue": [{"value": self.meter_value + 1500.0}]
+                    }
                 ]
             }
             await self.ocpp_client.call("TransactionEvent", payload)

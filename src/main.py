@@ -53,7 +53,7 @@ async def main():
 
     # 1. Configuration
     station_id = "STM32_CS_01"
-    server_ws_url = "ws://192.168.0.30:8005/ocpp" # 타겟 Real CSMS 주소
+    server_ws_url = "ws://192.168.0.82:8000/ocpp/2.0.1" # 타겟 Real CSMS 주소
     
     client = OCPPClient(station_id, server_ws_url)
     controller = ChargingStationController(client)

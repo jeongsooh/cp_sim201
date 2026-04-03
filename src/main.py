@@ -104,7 +104,7 @@ async def cp_adc_monitor(controller: ChargingStationController):
     state_c_threshold = 40000
     
     while True:
-        adc_val = controller.connector_hal.read_cp_voltage()
+        adc_val = controller.power_contactor_hal.read_cp_voltage()
         # If ADC is valid and drops below 40k, EV is pulling power (State C)
         if 0 < adc_val < state_c_threshold:
             if controller.transaction_id and not getattr(controller, "_state_c_active", False):

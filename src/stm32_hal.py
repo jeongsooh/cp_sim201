@@ -100,16 +100,22 @@ class STM32HardwareAPI(HardwareAPI):
         except Exception as e:
             return 0
 
-    def read_physical_connection(self) -> str:
-        """Reads physical sensor to determine if cable is Available or Occupied"""
-        if not self.req_prox:
-            return "Available"
-        try:
-            val = self.req_prox.get_value(3)
-            return "Occupied" if val == Value.ACTIVE else "Available"
-        except Exception as e:
-            logger.error(f"Error reading PI3 proximity: {e}")
-            return "Available"
+    def check_proximity(self, connector_id: int) -> bool:
+        """Reads PP/CP to determine if EV is physically connected"""
+        # 1. ADC-based CP detection: Voltage Drop below 50k (~9V or ~6V) means State B or C
+        adc_val = self.read_cp_adc(1)
+        if 0 < adc_val < 50000:
+            return True
+            
+        # 2. GPIO-based PP detection: Physical pin PI3 fallback
+        if self.req_prox:
+            try:
+                if self.req_prox.get_value(3) == Value.ACTIVE:
+                    return True
+            except Exception as e:
+                logger.error(f"Error reading PI3 proximity: {e}")
+                
+        return False
 
     def relay_on(self, evse_id: int):
         """Closes the physical relay switch to provide AC power"""

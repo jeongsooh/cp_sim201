@@ -89,6 +89,7 @@ class OCPPClient:
     async def _listen(self):
         try:
             async for message in self.ws:
+                logger.info(f"WS RECV: {message}")
                 await self._handle_message(message)
         except ConnectionClosed:
             logger.warning("Listen task stopped due to ConnectionClosed")
@@ -182,7 +183,9 @@ class OCPPClient:
         self._pending_actions[msg_id] = action
 
         try:
-            await self.ws.send(json.dumps(call_msg))
+            raw_msg = json.dumps(call_msg)
+            logger.info(f"WS SEND: {raw_msg}")
+            await self.ws.send(raw_msg)
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             raise WaitQueueError("Timeout waiting for response")

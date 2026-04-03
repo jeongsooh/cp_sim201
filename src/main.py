@@ -31,9 +31,14 @@ def blocking_read_rfid(ser) -> str:
             raw_hex = data.hex().upper()
             logger.info(f"Raw UART Bytes (HEX): {raw_hex}")
             
-            # The RFID module outputs binary/hex instead of ASCII. 
-            # We use the full hex representation as the unique token string.
-            return raw_hex
+            # Extract the actual 8-byte Card Number from the fixed binary frame
+            # Frame: STX(02) + Len(0009) + Cmd(43) + UUID(8 bytes) + Tail(3D) -> Example: 02000943 1040009970148953 3D
+            card_id = raw_hex
+            if raw_hex.startswith("02") and len(raw_hex) >= 24:
+                card_id = raw_hex[8:24]
+                logger.info(f"Extracted Card ID for Auth: {card_id}")
+                
+            return card_id
     except Exception as e:
         logger.error(f"Serial read error: {e}")
     return ""

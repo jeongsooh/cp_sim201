@@ -1,5 +1,11 @@
 import asyncio
 import logging
+import sys
+import os
+
+# Automatically add the project root to python path to avoid ModuleNotFoundError when running under Sudo.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src.ocpp_client import OCPPClient
 from src.controller import ChargingStationController
 

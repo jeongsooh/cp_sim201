@@ -35,9 +35,9 @@ def blocking_read_rfid(ser) -> str:
 
 async def rfid_monitor(controller: ChargingStationController):
     """
-    Background daemon to read RFID scans via /dev/ttySTM1 UART asynchronously.
+    Background daemon to read RFID scans via /dev/ttySTM5 UART asynchronously.
     """
-    port = "/dev/ttySTM1"
+    port = "/dev/ttySTM5"
     baudrate = 9600
     logger.info(f"Starting RFID UART monitor on {port} (Baud: {baudrate})")
     

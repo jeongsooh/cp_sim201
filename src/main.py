@@ -25,6 +25,7 @@ def blocking_read_rfid(ser) -> str:
     try:
         if ser and ser.in_waiting > 0:
             data = ser.read(ser.in_waiting)
+            logger.info(f"Raw UART Bytes (HEX): {data.hex()}")
             raw_str = data.decode('utf-8', errors='ignore').strip()
             # Clean up hex output by retaining only alphanumeric characters
             clean_token = ''.join(c for c in raw_str if c.isalnum())
@@ -38,7 +39,7 @@ async def rfid_monitor(controller: ChargingStationController):
     Background daemon to read RFID scans via /dev/ttySTM5 UART asynchronously.
     """
     port = "/dev/ttySTM5"
-    baudrate = 115200
+    baudrate = 9600
     logger.info(f"Starting RFID UART monitor on {port} (Baud: {baudrate})")
     
     try:

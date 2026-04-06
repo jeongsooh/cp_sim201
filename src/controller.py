@@ -109,7 +109,7 @@ class ChargingStationController:
             payload = {
                 "eventType": "Updated",
                 "timestamp": "2026-04-02T12:05:00Z",
-                "triggeredReason": "MeterValuePeriodic",
+                "triggerReason": "MeterValuePeriodic",
                 "seqNo": 1,
                 "transactionInfo": {
                     "transactionId": self.transaction_id
@@ -135,7 +135,7 @@ class ChargingStationController:
                 payload = {
                     "eventType": "Started",
                     "timestamp": "2026-04-02T12:05:00Z",
-                    "triggeredReason": "Authorized",
+                    "triggerReason": "Authorized",
                     "seqNo": 0,
                     "transactionInfo": {
                         "transactionId": self.transaction_id
@@ -164,7 +164,7 @@ class ChargingStationController:
             payload = {
                 "eventType": "Updated",
                 "timestamp": "2026-04-02T12:05:01Z",
-                "triggeredReason": "ChargingStateChanged",
+                "triggerReason": "ChargingStateChanged",
                 "seqNo": 1,
                 "transactionInfo": {
                     "transactionId": self.transaction_id,
@@ -184,7 +184,7 @@ class ChargingStationController:
             payload = {
                 "eventType": "Ended",
                 "timestamp": "2026-04-02T12:15:00Z",
-                "triggeredReason": "StopAuthorized" if stopped_reason == "Local" else "EVDisconnected",
+                "triggerReason": "StopAuthorized" if stopped_reason == "Local" else "EVDisconnected",
                 "seqNo": 2,
                 "transactionInfo": {
                     "transactionId": self.transaction_id,

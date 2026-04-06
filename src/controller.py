@@ -206,7 +206,7 @@ class ChargingStationController:
             payload = {
                 "eventType": "Ended",
                 "timestamp": now_iso,
-                "triggerReason": "StopAuthorized" if stopped_reason == "Local" else "EVDisconnected",
+                "triggerReason": "StopAuthorized" if stopped_reason == "Local" else "EVDeparted",
                 "seqNo": 2,
                 "transactionInfo": {
                     "transactionId": self.transaction_id,

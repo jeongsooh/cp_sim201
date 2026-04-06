@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 from .ocpp_client import OCPPClient
@@ -90,7 +91,7 @@ class ChargingStationController:
         logger.info("Cable plugged in. Connector Occupied.")
         self.connector_hal.status = "Occupied"
         payload = {
-            "timestamp": "2026-04-02T12:00:00Z",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "connectorStatus": "Occupied",
             "evseId": self.evse_id,
             "connectorId": self.connector_id
@@ -106,9 +107,10 @@ class ChargingStationController:
         while self.transaction_id == transaction_id:
             await asyncio.sleep(60)
             self.meter_value += 100.0
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             payload = {
                 "eventType": "Updated",
-                "timestamp": "2026-04-02T12:05:00Z",
+                "timestamp": now_iso,
                 "triggerReason": "MeterValuePeriodic",
                 "seqNo": 1,
                 "transactionInfo": {
@@ -116,7 +118,7 @@ class ChargingStationController:
                 },
                 "meterValue": [
                     {
-                        "timestamp": "2026-04-02T12:05:00Z",
+                        "timestamp": now_iso,
                         "sampledValue": [{"value": self.meter_value}]
                     }
                 ]
@@ -132,9 +134,10 @@ class ChargingStationController:
                 self.transaction_id = str(uuid.uuid4())
                 self.meter_value = 0.0
                 self._state_c_active = False
+                now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 payload = {
                     "eventType": "Started",
-                    "timestamp": "2026-04-02T12:05:00Z",
+                    "timestamp": now_iso,
                     "triggerReason": "Authorized",
                     "seqNo": 0,
                     "transactionInfo": {
@@ -142,7 +145,7 @@ class ChargingStationController:
                     },
                     "meterValue": [
                         {
-                            "timestamp": "2026-04-02T12:05:00Z",
+                            "timestamp": now_iso,
                             "sampledValue": [{"value": self.meter_value}]
                         }
                     ]
@@ -163,7 +166,7 @@ class ChargingStationController:
             logger.info("Control Pilot dropped to State C (+6V). EV is Charging!")
             payload = {
                 "eventType": "Updated",
-                "timestamp": "2026-04-02T12:05:01Z",
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "triggerReason": "ChargingStateChanged",
                 "seqNo": 1,
                 "transactionInfo": {
@@ -181,9 +184,10 @@ class ChargingStationController:
             
             if self._meter_task:
                 self._meter_task.cancel()
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             payload = {
                 "eventType": "Ended",
-                "timestamp": "2026-04-02T12:15:00Z",
+                "timestamp": now_iso,
                 "triggerReason": "StopAuthorized" if stopped_reason == "Local" else "EVDisconnected",
                 "seqNo": 2,
                 "transactionInfo": {
@@ -192,7 +196,7 @@ class ChargingStationController:
                 },
                 "meterValue": [
                     {
-                        "timestamp": "2026-04-02T12:15:00Z",
+                        "timestamp": now_iso,
                         "sampledValue": [{"value": self.meter_value + 1500.0}]
                     }
                 ]

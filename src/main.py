@@ -100,8 +100,7 @@ async def proximity_monitor(controller: ChargingStationController):
             if stable_status == "Occupied":
                 await controller.simulate_cable_plugged()
             else:
-                # Triggers StatusNotification (Available)
-                await controller.connector_hal.on_status_change()
+                await controller.simulate_cable_unplugged()
         
         # Poll rapidly for debounce
         await asyncio.sleep(0.2)

@@ -102,6 +102,24 @@ class ChargingStationController:
         except Exception as e:
             logger.error(f"Failed to process cable plug in: {e}")
 
+    async def simulate_cable_unplugged(self):
+        logger.info("Cable unplugged. Connector Available.")
+        self.connector_hal.status = "Available"
+        if self.transaction_id:
+            logger.info("Transaction active during unplug. Stopping transaction (EVDisconnected).")
+            await self.stop_transaction("EVDisconnected")
+            
+        payload = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "connectorStatus": "Available",
+            "evseId": self.evse_id,
+            "connectorId": self.connector_id
+        }
+        try:
+            await self.ocpp_client.call("StatusNotification", payload)
+        except Exception as e:
+            logger.error(f"Failed to process cable unplug: {e}")
+
     async def _meter_values_loop(self, transaction_id: str):
         """TC_J_02_CS: Periodically reports TransactionEvent(Updated) with MeterValues"""
         while self.transaction_id == transaction_id:

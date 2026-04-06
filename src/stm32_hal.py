@@ -89,14 +89,24 @@ class STM32HardwareAPI(HardwareAPI):
             logger.error(f"Failed to set CP PWM: {e}")
 
     def read_cp_adc(self, evse_id: int) -> int:
-        """Reads CP Voltage from STM32 IIO ADC Channel 0"""
+        """Reads Peak CP Voltage from STM32 IIO ADC using Burst Sampling"""
         if evse_id != 1: return 0
         adc_path = "/sys/bus/iio/devices/iio:device2/in_voltage0_raw"
         import os
         if not os.path.exists(adc_path): return 0
+        
+        # Burst sample to catch the Peak of 1kHz PWM (e.g. 16.6% duty)
+        max_val = 0
         try:
             with open(adc_path, "r") as f:
-                return int(f.read().strip())
+                for _ in range(40):
+                    f.seek(0)
+                    val_str = f.read().strip()
+                    if val_str:
+                        val = int(val_str)
+                        if val > max_val:
+                            max_val = val
+            return max_val
         except Exception as e:
             return 0
 

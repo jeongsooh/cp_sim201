@@ -76,24 +76,35 @@ async def rfid_monitor(controller: ChargingStationController):
 
 async def proximity_monitor(controller: ChargingStationController):
     """
-    Background daemon to scan physical connection state (PI3 pin) and trigger OCCP events.
+    Background daemon to scan physical connection state (PI3/ADC) and trigger OCCP events with debounce.
     """
-    logger.info("Starting Proximity GPIO monitor daemon (Polling PI3)")
-    last_status = "Available"
+    logger.info("Starting Proximity monitor daemon (Polled with Debounce)")
+    stable_status = "Available"
+    pending_status = "Available"
+    consecutive_counts = 0
+    REQUIRED_COUNTS = 5  # Needs 5 consecutive matches (5 * 0.2s = 1.0s)
+    
     while True:
         # read_physical_connection calls sysfs directly
         current_status = controller.connector_hal.read_physical_connection()
-        if current_status != last_status:
-            logger.info(f"Physical Connection changed from {last_status} to {current_status}")
-            last_status = current_status
-            if current_status == "Occupied":
+        
+        if current_status == pending_status:
+            consecutive_counts += 1
+        else:
+            pending_status = current_status
+            consecutive_counts = 1
+            
+        if consecutive_counts >= REQUIRED_COUNTS and pending_status != stable_status:
+            logger.info(f"Physical Connection STABLE: changed from {stable_status} to {pending_status}")
+            stable_status = pending_status
+            if stable_status == "Occupied":
                 await controller.simulate_cable_plugged()
             else:
                 # Triggers StatusNotification (Available)
                 await controller.connector_hal.on_status_change()
         
-        # Debounce/Poll delay
-        await asyncio.sleep(1)
+        # Poll rapidly for debounce
+        await asyncio.sleep(0.2)
 
 async def cp_adc_monitor(controller: ChargingStationController):
     """

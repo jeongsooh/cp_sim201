@@ -103,7 +103,8 @@ class STM32HardwareAPI(HardwareAPI):
             with serial.Serial('/dev/ttySTM5', 600, timeout=0.1) as s:
                 def cs_read_reg(page, reg):
                     s.write(bytes([0x80 | page])) # Select Page
-                    s.write(bytes([reg]))         # Read Command
+                    # For CS5490, a Read Command is 0b001xxxxx, so we must bitwise OR the register address with 0x20!
+                    s.write(bytes([0x20 | reg]))  
                     time.sleep(0.01)
                     resp = s.read(3)
                     if len(resp) == 3:

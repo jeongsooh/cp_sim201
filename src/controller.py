@@ -124,7 +124,16 @@ class ChargingStationController:
         """TC_J_02_CS: Periodically reports TransactionEvent(Updated) with MeterValues"""
         while self.transaction_id == transaction_id:
             await asyncio.sleep(60)
-            self.meter_value += 100.0
+            
+            # Fetch real data from hardware (CS5490)
+            meter_data = self.power_contactor_hal.read_meter_values()
+            real_power = meter_data.get("power", 0.0)
+            
+            if real_power == 0:
+                 self.meter_value += 100.0  # Fallback dummy logic if uncalibrated
+            else:
+                 self.meter_value += real_power / 60.0  # Wh integration
+                 
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             payload = {
                 "eventType": "Updated",

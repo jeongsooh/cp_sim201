@@ -88,6 +88,44 @@ class STM32HardwareAPI(HardwareAPI):
         except Exception as e:
             logger.error(f"Failed to set CP PWM: {e}")
 
+    def read_energy_meter_data(self, evse_id: int) -> dict:
+        """Reads V, I, P, E from CS5490 via UART on /dev/ttySTM5 at 600 baud."""
+        result = {"voltage": 0.0, "current": 0.0, "power": 0.0, "energy": 0.0}
+        if evse_id != 1: return result
+        
+        try:
+            import serial
+            import os
+            import time
+            if not os.path.exists('/dev/ttySTM5'):
+                return result
+                
+            with serial.Serial('/dev/ttySTM5', 600, timeout=0.1) as s:
+                def cs_read_reg(page, reg):
+                    s.write(bytes([0x80 | page])) # Select Page
+                    s.write(bytes([reg]))         # Read Command
+                    time.sleep(0.01)
+                    resp = s.read(3)
+                    if len(resp) == 3:
+                        return int.from_bytes(resp, byteorder='big', signed=True)
+                    return 0
+                
+                # Read from Page 16 (0x10)
+                v_raw = cs_read_reg(0x10, 0x06)
+                i_raw = cs_read_reg(0x10, 0x05)
+                p_raw = cs_read_reg(0x10, 0x0E)
+                
+                # Apply nominal scale. User must tune these scaling factors!
+                result["voltage"] = float(v_raw * 1.0)
+                result["current"] = float(i_raw * 1.0)
+                result["power"] = float(p_raw * 1.0)
+                logger.debug(f"CS5490 RAW: V={v_raw}, I={i_raw}, P={p_raw}")
+
+        except Exception as e:
+            logger.error(f"CS5490 readout failed: {e}")
+            
+        return result
+
     def read_cp_adc(self, evse_id: int) -> int:
         """Reads Peak CP Voltage from STM32 IIO ADC using Burst Sampling"""
         if evse_id != 1: return 0

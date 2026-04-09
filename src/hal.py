@@ -38,6 +38,11 @@ class HardwareAPI:
         # Control Pilot ADC raw measurement 측정
         return 0
 
+    @staticmethod
+    def read_energy_meter_data(evse_id: int) -> dict:
+        """Returns V, I, P, E values from connected serial energy meter."""
+        return {"voltage": 0.0, "current": 0.0, "power": 0.0, "energy": 0.0}
+
 
 class ConnectorHAL:
     def __init__(self, evse_id: int, connector_id: int, ocpp_client=None):
@@ -121,3 +126,6 @@ class PowerContactorHAL:
     def set_pwm_duty(self, duty_percent: int):
         HardwareAPI.set_cp_pwm(self.evse_id, duty_percent)
         logger.info(f"Control Pilot PWM on EVSE {self.evse_id} set to {duty_percent}%")
+
+    def read_meter_values(self) -> dict:
+        return HardwareAPI.read_energy_meter_data(self.evse_id)

@@ -44,10 +44,10 @@ class STM32HardwareAPI(HardwareAPI):
         except Exception as e:
             logger.error(f"Failed to initialize gpiod v2 lines: {e}")
         
-        # Serial RFID Interface placeholder
         self.rfid_serial_port = "/dev/ttySTM6"
         
         self._init_cp_pwm()
+        self._init_cs5490()
 
     def _init_cp_pwm(self):
         """1kHz PWM 100% (State A/B Standby) 초기화"""
@@ -67,6 +67,31 @@ class STM32HardwareAPI(HardwareAPI):
                 
         # Default 100% (DC)
         self.set_cp_pwm(1, 100)
+
+    def _init_cs5490(self):
+        """Send Sync, Software Reset, and Start Conversions to CS5490."""
+        import os
+        if not os.path.exists('/dev/ttySTM5'):
+            return
+        logger.info("Initializing CS5490 Energy Meter via /dev/ttySTM5...")
+        try:
+            import serial
+            import time
+            with serial.Serial('/dev/ttySTM5', 600, timeout=0.5) as s:
+                # 1. Serial Port Sync
+                s.write(b'\xFF\xFF\xFF\xFE')
+                time.sleep(0.1)
+                
+                # 2. Software Reset Instruction (0x5E)
+                s.write(b'\x5E')
+                time.sleep(0.5)  # Wait for reset to complete
+                
+                # 3. Start Continuous Conversions (0xD5)
+                s.write(b'\xD5')
+                time.sleep(0.1)
+                logger.info("CS5490 Successfully Awoken (Continuous Conversions Started).")
+        except Exception as e:
+            logger.error(f"Failed to initialize CS5490: {e}")
 
     def set_cp_pwm(self, evse_id: int, duty_percent: int):
         """Control Pilot PWM 실시간 변경"""

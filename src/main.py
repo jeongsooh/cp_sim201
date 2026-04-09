@@ -9,16 +9,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.ocpp_client import OCPPClient
 from src.controller import ChargingStationController
 
-# Replace default HardwareAPI with STM32 custom logic seamlessly
-import src.hal
-from src.stm32_hal import STM32HardwareAPI
-src.hal.HardwareAPI = STM32HardwareAPI()
-
 logging.basicConfig(
     level=logging.INFO, 
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
 )
 logger = logging.getLogger("MAIN")
+
+# Replace default HardwareAPI with STM32 custom logic seamlessly
+import src.hal
+from src.stm32_hal import STM32HardwareAPI
+src.hal.HardwareAPI = STM32HardwareAPI()
 
 import time
 

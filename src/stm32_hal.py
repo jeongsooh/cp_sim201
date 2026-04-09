@@ -145,7 +145,7 @@ class STM32HardwareAPI(HardwareAPI):
                 result["voltage"] = float(v_raw * 1.0)
                 result["current"] = float(i_raw * 1.0)
                 result["power"] = float(p_raw * 1.0)
-                logger.debug(f"CS5490 RAW: V={v_raw}, I={i_raw}, P={p_raw}")
+                logger.info(f"CS5490 RAW: V={v_raw}, I={i_raw}, P={p_raw}")
 
         except Exception as e:
             logger.error(f"CS5490 readout failed: {e}")

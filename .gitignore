@@ -14,3 +14,4 @@ tmp_*
 test_out.txt
 parsed_docs.md
 .gemini/
+.claude/

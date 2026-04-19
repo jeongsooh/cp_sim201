@@ -43,7 +43,7 @@ def blocking_read_rfid(ser) -> str:
         logger.error(f"Serial read error: {e}")
     return ""
 
-async def rfid_monitor(controller: ChargingStationController):
+async def rfid_monitor(controller: ChargingStationController) -> None:
     """
     Background daemon to read RFID scans via /dev/ttySTM6 UART asynchronously.
     """
@@ -74,7 +74,7 @@ async def rfid_monitor(controller: ChargingStationController):
                 # a transaction if accepted by CSMS and connector is plugged.
                 await controller.handle_rfid_scan(uid)
 
-async def proximity_monitor(controller: ChargingStationController):
+async def proximity_monitor(controller: ChargingStationController) -> None:
     """
     Background daemon to scan physical connection state (PI3/ADC) and trigger OCCP events with debounce.
     """
@@ -105,7 +105,7 @@ async def proximity_monitor(controller: ChargingStationController):
         # Poll rapidly for debounce
         await asyncio.sleep(0.2)
 
-async def cp_adc_monitor(controller: ChargingStationController):
+async def cp_adc_monitor(controller: ChargingStationController) -> None:
     """
     Background daemon to scan ADC Channel 0 for State C transitions (+6V).
     State A: ~53000 | State B: ~45000 | State C: ~36500
@@ -122,7 +122,7 @@ async def cp_adc_monitor(controller: ChargingStationController):
                 
         await asyncio.sleep(0.5)
 
-async def main():
+async def main() -> None:
     logger.info("========================================")
     logger.info("   STM32MP1 CP700P EV Charger daemon    ")
     logger.info("========================================")

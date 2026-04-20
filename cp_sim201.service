@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=/home/jeongsooh/cp_sim201/scripts/start_daemon.sh
+ExecStart=/bin/bash /home/jeongsooh/cp_sim201/scripts/start_daemon.sh
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

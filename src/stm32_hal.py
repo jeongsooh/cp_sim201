@@ -185,7 +185,8 @@ class STM32HardwareAPI(HardwareAPI):
           0x05 = PAVG  (active power,  signed   Q23, full-scale fraction)
 
         Voltage full-scale: 250mVpeak / (1K/1689K divider) → 220V gives 130mV RMS
-          V_FULLSCALE = 220 × (176.78mV / 130mV) ≈ 299V
+          Theoretical V_FULLSCALE = 299V, but observed reads ~102V at 220V.
+          Empirical calibration factor ≈ 2.14 → V_FULLSCALE set to 640V.
         Current full-scale: 50x PGA (Config0 IPGA=10), full-scale = 50mVpeak = 35.35mVrms.
           I_FULLSCALE = 35.35mV_rms / R_shunt_ohms  — set R_SHUNT below.
         """
@@ -200,16 +201,19 @@ class STM32HardwareAPI(HardwareAPI):
             i_raw = self._cs5490_read_reg(0x10, 0x06)  # IRMS
             p_raw = self._cs5490_read_reg(0x10, 0x05)  # PAVG (signed Q23)
             igain = self._cs5490_read_reg(0x10, 0x24)  # IGAIN (diagnostic, expect 0x400000)
+            vgain = self._cs5490_read_reg(0x10, 0x26)  # VGAIN (diagnostic, expect 0x400000)
 
             logger.info(f"CS5490 RAW: VRMS=0x{v_raw or 0:06X}"
                         f"  IRMS=0x{i_raw or 0:06X}"
                         f"  PAVG=0x{p_raw or 0:06X}"
-                        f"  IGAIN=0x{igain or 0:06X}")
+                        f"  IGAIN=0x{igain or 0:06X}"
+                        f"  VGAIN=0x{vgain or 0:06X}")
 
             # Voltage: schematic 4×422K+1K divider → 130mV RMS @ 220V.
             # CS5490 voltage channel full-scale = 250mVpeak = 176.78mVrms.
-            # V_FULLSCALE = 220 × (176.78 / 130) ≈ 299V
-            V_FULLSCALE = 299.0
+            # Observed VRMS ≈ 102.6V at actual ~220V → calibration factor ≈ 2.14.
+            # V_FULLSCALE = 299 × 2.14 ≈ 640V  (pending empirical measurement)
+            V_FULLSCALE = 640.0
 
             # Current: 50x PGA (IPGA=10 in Config0), full-scale = 50mVpeak = 35.35mVrms.
             # R_shunt = 300μΩ → I_FULLSCALE = 35.35mV / 0.0003Ω = 117.8A

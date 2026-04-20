@@ -242,7 +242,7 @@ class ChargingStationController:
                 continue
             value = energy_wh if key is None else meter_data.get(key, 0.0)
             result.append({
-                "value": str(round(value, 3)),
+                "value": round(value, 3),
                 "context": context,
                 "measurand": m,
                 "unitOfMeasure": {"unit": unit},

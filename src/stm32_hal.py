@@ -18,6 +18,7 @@ class STM32HardwareAPI(HardwareAPI):
         
         self.req_relay = None
         self.req_prox = None
+        self._cs5490 = None
 
         if not HAS_V2:
             logger.error("gpiod v2 API not found. Please ensure proper python3-gpiod is installed.")
@@ -69,29 +70,24 @@ class STM32HardwareAPI(HardwareAPI):
         self.set_cp_pwm(1, 100)
 
     def _init_cs5490(self):
-        """Send Sync, Software Reset, and Start Conversions to CS5490."""
-        import os
+        """Open persistent serial port, sync, reset, and start continuous conversions."""
+        import os, serial, time
         if not os.path.exists('/dev/ttySTM5'):
             return
         logger.info("Initializing CS5490 Energy Meter via /dev/ttySTM5...")
         try:
-            import serial
-            import time
-            with serial.Serial('/dev/ttySTM5', 600, timeout=0.5) as s:
-                # 1. Serial Port Sync
-                s.write(b'\xFF\xFF\xFF\xFE')
-                time.sleep(0.1)
-                
-                # 2. Software Reset Instruction (0x5E)
-                s.write(b'\x5E')
-                time.sleep(0.5)  # Wait for reset to complete
-                
-                # 3. Start Continuous Conversions (0xD5)
-                s.write(b'\xD5')
-                time.sleep(0.1)
-                logger.info("CS5490 Successfully Awoken (Continuous Conversions Started).")
+            self._cs5490 = serial.Serial('/dev/ttySTM5', 600, timeout=1.0)
+            self._cs5490.write(b'\xFF\xFF\xFF\xFE')
+            time.sleep(0.1)
+            self._cs5490.write(b'\x5E')   # Software Reset
+            time.sleep(0.5)
+            self._cs5490.write(b'\xD5')   # Start Continuous Conversions
+            time.sleep(1.5)               # Wait for first full conversion cycle
+            self._cs5490.reset_input_buffer()
+            logger.info("CS5490 initialized, continuous conversions running.")
         except Exception as e:
             logger.error(f"Failed to initialize CS5490: {e}")
+            self._cs5490 = None
 
     def set_cp_pwm(self, evse_id: int, duty_percent: int):
         """Control Pilot PWM 실시간 변경"""
@@ -125,64 +121,56 @@ class STM32HardwareAPI(HardwareAPI):
         Scaling factors must be tuned to match hardware voltage divider / CT ratio.
         """
         result = {"voltage": 0.0, "current": 0.0, "power": 0.0, "energy": 0.0}
-        if evse_id != 1:
+        if evse_id != 1 or self._cs5490 is None:
             return result
 
         try:
-            import serial
-            import os
             import time
-            if not os.path.exists('/dev/ttySTM5'):
-                return result
+            s = self._cs5490
 
-            with serial.Serial('/dev/ttySTM5', 600, timeout=1.0) as s:
-                # Re-sync UART framing without software reset (4 bytes @ 600 baud ≈ 67ms)
-                s.write(b'\xFF\xFF\xFF\xFE')
-                time.sleep(0.08)
+            def cs_read_reg(page, reg):
                 s.reset_input_buffer()
+                s.write(bytes([0x80 | page]))  # Page select
+                time.sleep(0.06)               # 1 byte @ 600 baud = ~17 ms
+                s.write(bytes([0x20 | reg]))   # Read instruction (bit5=1)
+                time.sleep(0.06)
+                resp = s.read(3)               # 3-byte response @ 600 baud = ~50 ms
+                if len(resp) == 3:
+                    return int.from_bytes(resp, byteorder='big', signed=False)
+                return None
 
-                def cs_read_reg(page, reg):
-                    s.reset_input_buffer()
-                    s.write(bytes([0x80 | page]))  # Page select
-                    time.sleep(0.06)               # 1 byte @ 600 baud = ~17 ms
-                    s.write(bytes([0x20 | reg]))   # Read instruction (bit5=1)
-                    time.sleep(0.06)
-                    resp = s.read(3)               # 3-byte response @ 600 baud = ~50 ms
-                    if len(resp) == 3:
-                        return int.from_bytes(resp, byteorder='big', signed=False)
-                    return None
+            # Page 16 measurement registers
+            v_raw  = cs_read_reg(0x10, 0x10)  # VRMS
+            i_raw  = cs_read_reg(0x10, 0x0F)  # IRMS
+            p_raw  = cs_read_reg(0x10, 0x05)  # P_AVG (signed)
+            i_inst = cs_read_reg(0x10, 0x00)  # I instantaneous (current channel diagnostic)
+            igain  = cs_read_reg(0x10, 0x07)  # I_GAIN register
 
-                # Correct register addresses (Page 16)
-                v_raw = cs_read_reg(0x10, 0x10)  # VRMS
-                i_raw = cs_read_reg(0x10, 0x0F)  # IRMS
-                p_raw = cs_read_reg(0x10, 0x05)  # P_AVG (signed — re-interpret below)
+            logger.info(f"CS5490 RAW: VRMS=0x{v_raw or 0:06X}({v_raw})"
+                        f"  IRMS=0x{i_raw or 0:06X}({i_raw})"
+                        f"  P_AVG=0x{p_raw or 0:06X}({p_raw})"
+                        f"  I_inst=0x{i_inst or 0:06X}  I_GAIN=0x{igain or 0:06X}")
 
-                logger.info(f"CS5490 RAW: VRMS=0x{v_raw or 0:06X}({v_raw})"
-                            f"  IRMS=0x{i_raw or 0:06X}({i_raw})"
-                            f"  P_AVG=0x{p_raw or 0:06X}({p_raw})")
+            V_FULLSCALE = 250.0
+            I_FULLSCALE = 32.0
 
-                if v_raw is not None:
-                    # Q23 unsigned fraction → actual volts (tune V_FULLSCALE to match hardware)
-                    V_FULLSCALE = 250.0
-                    result["voltage"] = (v_raw / 0xFFFFFF) * V_FULLSCALE
+            if v_raw is not None:
+                result["voltage"] = (v_raw / 0xFFFFFF) * V_FULLSCALE
 
-                if i_raw is not None:
-                    # Q23 unsigned fraction → actual amps (tune I_FULLSCALE to match CT/shunt)
-                    I_FULLSCALE = 32.0
-                    result["current"] = (i_raw / 0xFFFFFF) * I_FULLSCALE
+            if i_raw is not None:
+                result["current"] = (i_raw / 0xFFFFFF) * I_FULLSCALE
 
-                if p_raw is not None:
-                    # P_AVG is signed Q23 — reinterpret as signed 24-bit
-                    p_signed = p_raw if p_raw < 0x800000 else p_raw - 0x1000000
-                    P_FULLSCALE = V_FULLSCALE * I_FULLSCALE
-                    result["power"] = (p_signed / 0x7FFFFF) * P_FULLSCALE
+            if p_raw is not None:
+                p_signed = p_raw if p_raw < 0x800000 else p_raw - 0x1000000
+                result["power"] = (p_signed / 0x7FFFFF) * (V_FULLSCALE * I_FULLSCALE)
 
-                logger.info(f"CS5490 SCALED: V={result['voltage']:.1f}V"
-                            f"  I={result['current']:.2f}A"
-                            f"  P={result['power']:.1f}W")
+            logger.info(f"CS5490 SCALED: V={result['voltage']:.1f}V"
+                        f"  I={result['current']:.2f}A"
+                        f"  P={result['power']:.1f}W")
 
         except Exception as e:
             logger.error(f"CS5490 readout failed: {e}")
+            self._cs5490 = None  # Mark as dead; reinit on next startup
 
         return result
 

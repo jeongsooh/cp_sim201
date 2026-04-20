@@ -114,42 +114,71 @@ class STM32HardwareAPI(HardwareAPI):
             logger.error(f"Failed to set CP PWM: {e}")
 
     def read_energy_meter_data(self, evse_id: int) -> dict:
-        """Reads V, I, P, E from CS5490 via UART on /dev/ttySTM5 at 600 baud."""
+        """Reads V, I, P from CS5490 via UART on /dev/ttySTM5 at 600 baud.
+
+        CS5490 Page 16 register map (Table 18):
+          0x0F = IRMS  (RMS current,  unsigned Q23)
+          0x10 = VRMS  (RMS voltage,  unsigned Q23)
+          0x05 = P_AVG (active power, signed Q23)
+
+        Raw values are normalized fractions of full-scale.
+        Scaling factors must be tuned to match hardware voltage divider / CT ratio.
+        """
         result = {"voltage": 0.0, "current": 0.0, "power": 0.0, "energy": 0.0}
-        if evse_id != 1: return result
-        
+        if evse_id != 1:
+            return result
+
         try:
             import serial
             import os
             import time
             if not os.path.exists('/dev/ttySTM5'):
                 return result
-                
-            with serial.Serial('/dev/ttySTM5', 600, timeout=0.1) as s:
+
+            with serial.Serial('/dev/ttySTM5', 600, timeout=1.0) as s:
                 def cs_read_reg(page, reg):
-                    s.write(bytes([0x80 | page])) # Select Page
-                    # For CS5490, a Read Command is 0b001xxxxx, so we must bitwise OR the register address with 0x20!
-                    s.write(bytes([0x20 | reg]))  
-                    time.sleep(0.01)
-                    resp = s.read(3)
+                    s.reset_input_buffer()
+                    s.write(bytes([0x80 | page]))  # Page select
+                    time.sleep(0.06)               # 1 byte @ 600 baud = ~17 ms
+                    s.write(bytes([0x20 | reg]))   # Read instruction (bit5=1)
+                    time.sleep(0.06)
+                    resp = s.read(3)               # 3-byte response @ 600 baud = ~50 ms
                     if len(resp) == 3:
-                        return int.from_bytes(resp, byteorder='big', signed=True)
-                    return 0
-                
-                # Read from Page 16 (0x10)
-                v_raw = cs_read_reg(0x10, 0x06)
-                i_raw = cs_read_reg(0x10, 0x05)
-                p_raw = cs_read_reg(0x10, 0x0E)
-                
-                # Apply nominal scale. User must tune these scaling factors!
-                result["voltage"] = float(v_raw * 1.0)
-                result["current"] = float(i_raw * 1.0)
-                result["power"] = float(p_raw * 1.0)
-                logger.info(f"CS5490 RAW: V={v_raw}, I={i_raw}, P={p_raw}")
+                        return int.from_bytes(resp, byteorder='big', signed=False)
+                    return None
+
+                # Correct register addresses (Page 16)
+                v_raw = cs_read_reg(0x10, 0x10)  # VRMS
+                i_raw = cs_read_reg(0x10, 0x0F)  # IRMS
+                p_raw = cs_read_reg(0x10, 0x05)  # P_AVG (signed — re-interpret below)
+
+                logger.info(f"CS5490 RAW: VRMS=0x{v_raw or 0:06X}({v_raw})"
+                            f"  IRMS=0x{i_raw or 0:06X}({i_raw})"
+                            f"  P_AVG=0x{p_raw or 0:06X}({p_raw})")
+
+                if v_raw is not None:
+                    # Q23 unsigned fraction → actual volts (tune V_FULLSCALE to match hardware)
+                    V_FULLSCALE = 250.0
+                    result["voltage"] = (v_raw / 0xFFFFFF) * V_FULLSCALE
+
+                if i_raw is not None:
+                    # Q23 unsigned fraction → actual amps (tune I_FULLSCALE to match CT/shunt)
+                    I_FULLSCALE = 32.0
+                    result["current"] = (i_raw / 0xFFFFFF) * I_FULLSCALE
+
+                if p_raw is not None:
+                    # P_AVG is signed Q23 — reinterpret as signed 24-bit
+                    p_signed = p_raw if p_raw < 0x800000 else p_raw - 0x1000000
+                    P_FULLSCALE = V_FULLSCALE * I_FULLSCALE
+                    result["power"] = (p_signed / 0x7FFFFF) * P_FULLSCALE
+
+                logger.info(f"CS5490 SCALED: V={result['voltage']:.1f}V"
+                            f"  I={result['current']:.2f}A"
+                            f"  P={result['power']:.1f}W")
 
         except Exception as e:
             logger.error(f"CS5490 readout failed: {e}")
-            
+
         return result
 
     def read_cp_adc(self, evse_id: int) -> int:

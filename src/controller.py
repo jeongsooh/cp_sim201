@@ -88,6 +88,7 @@ class ChargingStationController:
                 "SampledDataTxUpdatedMeasurands": ("Current.Import,Voltage,Energy.Active.Import.Register", "ReadWrite"),
                 "SampledDataTxStartedMeasurands": ("Energy.Active.Import.Register", "ReadWrite"),
                 "SampledDataTxEndedMeasurands":   ("Energy.Active.Import.Register", "ReadWrite"),
+                "SupportedMeasurands":            ("Energy.Active.Import.Register,Current.Import,Voltage,Power.Active.Import", "ReadOnly"),
             },
             "AlignedDataCtrlr": {
                 "AlignedDataInterval":          ("0",                                  "ReadWrite"),

@@ -136,6 +136,11 @@ class STM32HardwareAPI(HardwareAPI):
                 return result
 
             with serial.Serial('/dev/ttySTM5', 600, timeout=1.0) as s:
+                # Re-sync UART framing without software reset (4 bytes @ 600 baud ≈ 67ms)
+                s.write(b'\xFF\xFF\xFF\xFE')
+                time.sleep(0.08)
+                s.reset_input_buffer()
+
                 def cs_read_reg(page, reg):
                     s.reset_input_buffer()
                     s.write(bytes([0x80 | page]))  # Page select

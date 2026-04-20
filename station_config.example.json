@@ -1,0 +1,58 @@
+{
+  "_how_to_use": "cp station_config.example.json station_config.json — then edit for your deployment.",
+
+  "serial_number": "000001",
+  "station_id": "STM32_CS_01",
+
+  "_security_profile_guide": [
+    "0: ws://  — no auth (development only)",
+    "1: ws://  — Basic Auth header only",
+    "2: wss:// — TLS + Basic Auth (user/password required, min 16 chars)",
+    "3: wss:// — TLS + Client Certificate / Mutual TLS (client_cert + client_key required)"
+  ],
+
+  "csms_url": "ws://192.168.0.82:8000/ocpp/2.0.1",
+  "security_profile": 0,
+
+  "_basic_auth_note": "Required for profile 1 and 2. Password must be 16-40 characters.",
+  "basic_auth": {
+    "user": "",
+    "password": ""
+  },
+
+  "_tls_note": [
+    "cert_dir : directory where InstallCertificate/CertificateSigned will write files",
+    "ca_cert  : server CA cert path (leave empty to use system CAs — e.g. Let's Encrypt)",
+    "client_cert / client_key : required for profile 3 only"
+  ],
+  "tls": {
+    "cert_dir": "/etc/cp_sim201/certs",
+    "ca_cert": "",
+    "client_cert": "",
+    "client_key": ""
+  },
+
+  "_profile2_example": {
+    "csms_url": "wss://csms.example.com:8443/ocpp/2.0.1",
+    "security_profile": 2,
+    "basic_auth": { "user": "STM32_CS_01", "password": "replace-this-min16chars" },
+    "tls": {
+      "cert_dir": "/etc/cp_sim201/certs",
+      "ca_cert": "/etc/cp_sim201/certs/ca.crt",
+      "client_cert": "",
+      "client_key": ""
+    }
+  },
+
+  "_profile3_example": {
+    "csms_url": "wss://csms.example.com:8443/ocpp/2.0.1",
+    "security_profile": 3,
+    "basic_auth": { "user": "", "password": "" },
+    "tls": {
+      "cert_dir": "/etc/cp_sim201/certs",
+      "ca_cert": "/etc/cp_sim201/certs/ca.crt",
+      "client_cert": "/etc/cp_sim201/certs/client.crt",
+      "client_key": "/etc/cp_sim201/certs/client.key"
+    }
+  }
+}

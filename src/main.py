@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.ocpp_client import OCPPClient
 from src.controller import ChargingStationController
+from src.station_config import StationConfig, StationConfigError
 
 logging.basicConfig(
     level=logging.INFO, 
@@ -128,11 +129,16 @@ async def main() -> None:
     logger.info("========================================")
 
     # 1. Configuration
-    station_id = "STM32_CS_01"
-    server_ws_url = "ws://192.168.0.82:8000/ocpp/2.0.1" # 타겟 Real CSMS 주소
-    
-    client = OCPPClient(station_id, server_ws_url)
-    controller = ChargingStationController(client)
+    try:
+        cfg = StationConfig()
+    except (StationConfigError, FileNotFoundError) as e:
+        logger.error(f"Failed to load station_config.json: {e}")
+        return
+
+    logger.info(f"Station config loaded: {cfg}")
+
+    client = OCPPClient(cfg.station_id, cfg.csms_url, ws_kwargs=cfg.build_ws_kwargs())
+    controller = ChargingStationController(client, cert_dir=cfg.cert_dir)
 
     # 2. Connect to CSMS in the background
     client_task = asyncio.create_task(client.connect())

@@ -29,14 +29,14 @@ def mock_client():
 
 
 @pytest.fixture
-def controller(mock_client):
-    return ChargingStationController(mock_client)
+def controller(mock_client, tmp_path):
+    return ChargingStationController(mock_client, cert_dir=str(tmp_path))
 
 
 @pytest.fixture
-def controller_with_tx(mock_client):
+def controller_with_tx(mock_client, tmp_path):
     """Controller pre-loaded with an active transaction."""
-    ctrl = ChargingStationController(mock_client)
+    ctrl = ChargingStationController(mock_client, cert_dir=str(tmp_path))
     ctrl.connector_hal.status = "Occupied"
     ctrl.is_authorized = True
     ctrl.transaction_id = "TX-TEST-001"
@@ -72,28 +72,42 @@ async def test_TC_A_04_05_CS(controller, mock_client):
 
 @pytest.mark.asyncio
 async def test_TC_A_06_07_CS(controller, mock_client):
-    """TC_A_06_CS, TC_A_07_CS: InstallCertificate (RSA / ECC)"""
+    """TC_A_06_CS, TC_A_07_CS: InstallCertificate — 파일 저장 및 메모리 등록"""
     res = await controller.handle_install_certificate(
-        {"certificateType": "CSMSCertificate", "certificate": "dummy"}
+        {"certificateType": "CSMSRootCertificate", "certificate": "dummy_pem_rsa"}
     )
     assert res["status"] == "Accepted"
+    serial = controller._make_cert_hash_data("dummy_pem_rsa")["serialNumber"]
+    assert serial in controller.installed_certificates
 
 
 @pytest.mark.asyncio
 async def test_TC_A_09_10_CS(controller, mock_client):
-    """TC_A_09_CS, TC_A_10_CS: GetInstalledCertificateIds"""
+    """TC_A_09_CS, TC_A_10_CS: GetInstalledCertificateIds — 설치 후 목록 조회"""
+    await controller.handle_install_certificate(
+        {"certificateType": "CSMSRootCertificate", "certificate": "dummy_pem"}
+    )
     res = await controller.handle_get_installed_certificate_ids(
-        {"certificateType": ["CSMSCertificate"]}
+        {"certificateType": ["CSMSRootCertificate"]}
     )
     assert res["status"] == "Accepted"
     assert "certificateHashDataChain" in res
+    assert res["certificateHashDataChain"][0]["certificateType"] == "CSMSRootCertificate"
 
 
 @pytest.mark.asyncio
 async def test_TC_A_11_12_CS(controller, mock_client):
-    """TC_A_11_CS, TC_A_12_CS: DeleteCertificate (RSA / ECC)"""
-    res = await controller.handle_delete_certificate({"certificateHashData": {}})
+    """TC_A_11_CS, TC_A_12_CS: DeleteCertificate — 설치 후 삭제"""
+    pem = "dummy_pem_to_delete"
+    await controller.handle_install_certificate(
+        {"certificateType": "CSMSRootCertificate", "certificate": pem}
+    )
+    serial = controller._make_cert_hash_data(pem)["serialNumber"]
+    res = await controller.handle_delete_certificate(
+        {"certificateHashData": {"serialNumber": serial}}
+    )
     assert res["status"] == "Accepted"
+    assert serial not in controller.installed_certificates
 
 
 @pytest.mark.asyncio
@@ -118,12 +132,14 @@ async def test_TC_A_15_CS(controller, mock_client):
 
 @pytest.mark.asyncio
 async def test_TC_A_19_20_CS(controller, mock_client):
-    """TC_A_19_CS, TC_A_20_CS: CertificateSigned"""
+    """TC_A_19_CS, TC_A_20_CS: CertificateSigned — 파일 저장, 즉시 재연결 없음"""
     res = await controller.handle_certificate_signed({
-        "certificateChain": "dummy",
+        "certificateChain": "dummy_signed_cert",
         "certificateType": "ChargingStationCertificate",
     })
     assert res["status"] == "Accepted"
+    assert controller._pending_client_cert is not None
+    assert "client.crt" in controller._pending_client_cert
 
 
 def test_TC_A_21_22_23_CS():

@@ -20,10 +20,16 @@ class WaitQueueError(Exception):
 
 
 class OCPPClient:
-    def __init__(self, station_id: str, server_url: str) -> None:
+    def __init__(
+        self,
+        station_id: str,
+        server_url: str,
+        ws_kwargs: Optional[dict] = None,
+    ) -> None:
         self.station_id = station_id
         self.server_url = server_url if server_url.endswith("/") else server_url + "/"
         self.uri = f"{self.server_url}{self.station_id}"
+        self._ws_kwargs = ws_kwargs or {}
 
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self._pending_calls: Dict[str, asyncio.Future] = {}
@@ -82,6 +88,7 @@ class OCPPClient:
                 self.ws = await websockets.connect(
                     self.uri,
                     subprotocols=[OCPPConfig.WEBSOCKET_SUBPROTOCOL],
+                    **self._ws_kwargs,
                 )
                 logger.info("Connection established.")
                 attempt = 0

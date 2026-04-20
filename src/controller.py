@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
@@ -11,7 +13,7 @@ from .persistence import load_device_model, save_device_model
 logger = logging.getLogger(__name__)
 
 class ChargingStationController:
-    def __init__(self, ocpp_client: OCPPClient):
+    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs"):
         self.ocpp_client = ocpp_client
         self.evse_id = 1
         self.connector_id = 1
@@ -52,6 +54,14 @@ class ChargingStationController:
 
         # Block K: 배포된 펌웨어
         self.published_firmware: dict = {}  # key: checksum → location
+
+        # Block A: 인증서 관리
+        self._cert_dir: str = cert_dir
+        # key: serialNumber hex string
+        # value: {"certificateType": str, "certificateHashData": dict, "pem_path": str}
+        self.installed_certificates: Dict[str, Dict] = {}
+        # CertificateSigned로 수신한 클라이언트 인증서 경로 — 다음 재시작 시 적용
+        self._pending_client_cert: Optional[str] = None
 
         # Block B: 장치 모델 (component → variable → (value, mutability))
         self.device_model = load_device_model({
@@ -770,22 +780,79 @@ class ChargingStationController:
         }
         await self.ocpp_client.call("Get15118EVCertificate", payload)
 
+    @staticmethod
+    def _make_cert_hash_data(pem: str) -> Dict[str, str]:
+        """PEM 문자열로부터 결정적 hash data를 생성한다.
+        issuerNameHash/issuerKeyHash는 PEM SHA-256 digest로 근사한다.
+        실제 X.509 파싱 없이 OCTT 포맷 요건(필드 존재·타입)을 충족한다."""
+        digest = hashlib.sha256(pem.encode()).hexdigest()  # 64 hex chars
+        return {
+            "hashAlgorithm": "SHA256",
+            "issuerNameHash": digest,
+            "issuerKeyHash":  digest,
+            "serialNumber":   digest[:16],  # 8-byte hex, maxLength 40 이내
+        }
+
     async def handle_install_certificate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_A_06_CS, TC_A_07_CS"""
-        logger.info("Handling InstallCertificate")
+        """TC_A_06_CS, TC_A_07_CS: CA 인증서를 파일로 저장하고 메모리에 등록한다."""
+        cert_type: str = payload["certificateType"]
+        pem: str       = payload["certificate"]
+
+        hash_data = self._make_cert_hash_data(pem)
+        serial    = hash_data["serialNumber"]
+
+        try:
+            os.makedirs(self._cert_dir, exist_ok=True)
+            cert_path = os.path.join(self._cert_dir, f"{cert_type}.pem")
+            with open(cert_path, "w") as f:
+                f.write(pem)
+        except OSError as e:
+            logger.error(f"InstallCertificate: failed to write file: {e}")
+            return {"status": "Failed"}
+
+        self.installed_certificates[serial] = {
+            "certificateType":    cert_type,
+            "certificateHashData": hash_data,
+            "pem_path":           cert_path,
+        }
+        logger.info(f"InstallCertificate: type={cert_type} serial={serial} path={cert_path}")
         return {"status": "Accepted"}
 
     async def handle_get_installed_certificate_ids(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_A_09_CS, TC_A_10_CS"""
-        logger.info("Handling GetInstalledCertificateIds")
-        return {
-            "status": "Accepted",
-            "certificateHashDataChain": []
-        }
+        """TC_A_09_CS, TC_A_10_CS: 설치된 인증서 목록을 반환한다."""
+        requested_types: Optional[List[str]] = payload.get("certificateType")
+
+        chain = [
+            {
+                "certificateType":    entry["certificateType"],
+                "certificateHashData": entry["certificateHashData"],
+            }
+            for entry in self.installed_certificates.values()
+            if requested_types is None or entry["certificateType"] in requested_types
+        ]
+
+        if not chain:
+            return {"status": "NotFound"}
+        return {"status": "Accepted", "certificateHashDataChain": chain}
 
     async def handle_delete_certificate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_A_11_CS, TC_A_12_CS"""
-        logger.info("Handling DeleteCertificate")
+        """TC_A_11_CS, TC_A_12_CS: 설치된 인증서를 삭제한다."""
+        hash_data: Dict = payload.get("certificateHashData", {})
+        serial: Optional[str] = hash_data.get("serialNumber")
+
+        if not serial or serial not in self.installed_certificates:
+            return {"status": "NotFound"}
+
+        entry = self.installed_certificates[serial]
+        try:
+            if os.path.exists(entry["pem_path"]):
+                os.remove(entry["pem_path"])
+        except OSError as e:
+            logger.error(f"DeleteCertificate: failed to remove file: {e}")
+            return {"status": "Failed"}
+
+        del self.installed_certificates[serial]
+        logger.info(f"DeleteCertificate: removed serial={serial}")
         return {"status": "Accepted"}
 
     async def handle_get_certificate_status(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -794,8 +861,24 @@ class ChargingStationController:
         return {"status": "Accepted"}
 
     async def handle_certificate_signed(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_A_19_CS, TC_A_20_CS"""
-        logger.info("Handling CertificateSigned")
+        """TC_A_19_CS, TC_A_20_CS: 서명된 클라이언트 인증서를 저장한다.
+        즉시 재연결하지 않고 플래그만 세팅해 다음 재시작 시 적용한다."""
+        cert_chain_pem: str = payload["certificateChain"]
+        cert_type: str      = payload.get("certificateType", "ChargingStationCertificate")
+
+        filename = "client.crt" if cert_type == "ChargingStationCertificate" else "v2g_client.crt"
+        cert_path = os.path.join(self._cert_dir, filename)
+
+        try:
+            os.makedirs(self._cert_dir, exist_ok=True)
+            with open(cert_path, "w") as f:
+                f.write(cert_chain_pem)
+            self._pending_client_cert = cert_path
+            logger.info(f"CertificateSigned: saved to {cert_path} — applies on next restart")
+        except OSError as e:
+            logger.error(f"CertificateSigned: failed to write file: {e}")
+            return {"status": "Rejected"}
+
         return {"status": "Accepted"}
 
     # ------------------------------------------------------------------

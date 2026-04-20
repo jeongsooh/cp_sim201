@@ -15,3 +15,6 @@ test_out.txt
 parsed_docs.md
 .gemini/
 .claude/
+
+# Station provisioning config (contains credentials — do not commit)
+station_config.json

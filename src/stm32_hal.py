@@ -69,8 +69,42 @@ class STM32HardwareAPI(HardwareAPI):
         # Default 100% (DC)
         self.set_cp_pwm(1, 100)
 
+    def _cs5490_read_reg(self, page, addr):
+        """Read one CS5490 register.
+        CS5490 command format (datasheet Table 2):
+          Read:        bits[7:6]=00 → addr & 0x3F
+          Write:       bits[7:6]=01 → 0x40 | addr
+          Page Select: bits[7:6]=10 → 0x80 | page
+          Instruction: bits[7:6]=11 → 0xC0 | code
+        """
+        import time
+        s = self._cs5490
+        s.reset_input_buffer()
+        s.write(bytes([0x80 | page]))    # Page select
+        time.sleep(0.06)
+        s.write(bytes([addr & 0x3F]))    # Register Read (bits[7:6]=00)
+        time.sleep(0.06)
+        resp = s.read(3)
+        if len(resp) == 3:
+            return int.from_bytes(resp, 'big', signed=False)
+        return None
+
     def _init_cs5490(self):
-        """Open persistent serial port, sync, reset, configure gains, and start continuous conversions."""
+        """Open persistent serial port, software reset, and start continuous conversions.
+
+        CS5490 Page 16 register addresses (datasheet Table 6.3):
+          0x02=I_inst, 0x03=V_inst, 0x05=PAVG, 0x06=IRMS, 0x07=VRMS
+          0x24=IGAIN (default 0x400000), 0x26=VGAIN (default 0x400000)
+
+        Instructions (Table 3):
+          0xC1 = Software Reset (0xC0|0x01)
+          0xD5 = Start Continuous Conversions (0xC0|0x15)
+
+        NOTE: 0xFF bytes are NOT a sync — they are Gain Calibration instructions
+        (0xC0|0x3F). Sending them corrupts I_GAIN and V_GAIN.
+        Use the 128ms serial timeout instead: any incomplete transaction is cleared
+        automatically after 128ms of inactivity.
+        """
         import os, serial, time
         if not os.path.exists('/dev/ttySTM5'):
             return
@@ -79,35 +113,21 @@ class STM32HardwareAPI(HardwareAPI):
             s = serial.Serial('/dev/ttySTM5', 600, timeout=1.0)
             self._cs5490 = s
 
-            # Sync + Software Reset + Start Continuous Conversions
-            s.write(b'\xFF\xFF\xFF\xFE'); time.sleep(0.1)
-            s.write(b'\x5E');            time.sleep(0.7)   # Software Reset
-            s.write(b'\xD5');            time.sleep(1.5)   # Start Continuous Conversions
+            time.sleep(0.2)          # Let 128ms serial timeout clear any stale state
             s.reset_input_buffer()
 
-            # Write gain registers explicitly — software reset may leave them at 0
-            def cs_write_reg(page, reg, value_24bit):
-                s.write(bytes([0x80 | page]))              # Page select
-                time.sleep(0.06)
-                s.write(bytes([reg & 0x1F]))               # Write (bit5=0)
-                time.sleep(0.06)
-                s.write(value_24bit.to_bytes(3, 'big'))    # 3-byte payload
-                time.sleep(0.06)
+            s.write(b'\xC1')         # Software Reset instruction (0xC0|0x01)
+            time.sleep(0.5)          # Wait for internal initialization sequence
+            s.reset_input_buffer()
 
-            def cs_read_reg(page, reg):
-                s.reset_input_buffer()
-                s.write(bytes([0x80 | page])); time.sleep(0.06)
-                s.write(bytes([0x20 | reg]));  time.sleep(0.06)
-                resp = s.read(3)
-                return int.from_bytes(resp, 'big') if len(resp) == 3 else None
+            s.write(b'\xD5')         # Start Continuous Conversions (0xC0|0x15)
+            time.sleep(1.5)          # Default SampleCount=4000, OWR=4000Hz → 1s per cycle
+            s.reset_input_buffer()
 
-            cs_write_reg(0x10, 0x07, 0x400000)   # I_GAIN = unity
-            cs_write_reg(0x10, 0x09, 0x400000)   # V_GAIN = unity
-
-            igain = cs_read_reg(0x10, 0x07)
-            vgain = cs_read_reg(0x10, 0x09)
-            logger.info(f"CS5490 gain verify: I_GAIN=0x{igain or 0:06X}  V_GAIN=0x{vgain or 0:06X}")
-            logger.info("CS5490 initialized, continuous conversions running.")
+            igain = self._cs5490_read_reg(0x10, 0x24)
+            vgain = self._cs5490_read_reg(0x10, 0x26)
+            logger.info(f"CS5490 ready: I_GAIN=0x{igain or 0:06X} V_GAIN=0x{vgain or 0:06X} (expect 0x400000)")
+            logger.info("CS5490 continuous conversions started.")
         except Exception as e:
             logger.error(f"Failed to initialize CS5490: {e}")
             self._cs5490 = None
@@ -135,59 +155,42 @@ class STM32HardwareAPI(HardwareAPI):
     def read_energy_meter_data(self, evse_id: int) -> dict:
         """Reads V, I, P from CS5490 via UART on /dev/ttySTM5 at 600 baud.
 
-        CS5490 Page 16 register map (Table 18):
-          0x0F = IRMS  (RMS current,  unsigned Q23)
-          0x10 = VRMS  (RMS voltage,  unsigned Q23)
-          0x05 = P_AVG (active power, signed Q23)
+        CS5490 Page 16 register addresses (datasheet Table 6.3):
+          0x06 = IRMS  (RMS current,   unsigned Q23, full-scale fraction)
+          0x07 = VRMS  (RMS voltage,   unsigned Q23, full-scale fraction)
+          0x05 = PAVG  (active power,  signed   Q23, full-scale fraction)
 
-        Raw values are normalized fractions of full-scale.
-        Scaling factors must be tuned to match hardware voltage divider / CT ratio.
+        Voltage full-scale: 250mVpeak / (1K/1689K divider) → 220V gives 130mV RMS
+          V_FULLSCALE = 220 × (176.78mV / 130mV) ≈ 299V
+        Current full-scale: 250mVpeak (10x PGA, default Config0 IPGA=00)
+          I_FULLSCALE = 176.78mV_rms / R_shunt_ohms  — set R_SHUNT below.
         """
         result = {"voltage": 0.0, "current": 0.0, "power": 0.0, "energy": 0.0}
         if evse_id != 1 or self._cs5490 is None:
             return result
 
         try:
-            import time
-            s = self._cs5490
+            # No sync bytes needed. CS5490 128ms serial timeout clears stale state.
+            # Reads are spaced 60s apart so no timeout collision is possible.
+            v_raw = self._cs5490_read_reg(0x10, 0x07)  # VRMS
+            i_raw = self._cs5490_read_reg(0x10, 0x06)  # IRMS
+            p_raw = self._cs5490_read_reg(0x10, 0x05)  # PAVG (signed Q23)
+            igain = self._cs5490_read_reg(0x10, 0x24)  # IGAIN (diagnostic, expect 0x400000)
 
-            # Re-sync UART framing before each read batch.
-            # Use 0xFF×5 only — 0xFE at end of sync is a CS5490 special instruction
-            # that corrupts register state without a following software reset.
-            s.write(b'\xFF\xFF\xFF\xFF\xFF')
-            time.sleep(0.10)
-            s.reset_input_buffer()
+            logger.info(f"CS5490 RAW: VRMS=0x{v_raw or 0:06X}"
+                        f"  IRMS=0x{i_raw or 0:06X}"
+                        f"  PAVG=0x{p_raw or 0:06X}"
+                        f"  IGAIN=0x{igain or 0:06X}")
 
-            def cs_read_reg(page, reg):
-                s.reset_input_buffer()
-                s.write(bytes([0x80 | page]))  # Page select
-                time.sleep(0.06)               # 1 byte @ 600 baud = ~17 ms
-                s.write(bytes([0x20 | reg]))   # Read instruction (bit5=1)
-                time.sleep(0.06)
-                resp = s.read(3)               # 3-byte response @ 600 baud = ~50 ms
-                if len(resp) == 3:
-                    return int.from_bytes(resp, byteorder='big', signed=False)
-                return None
+            # Voltage: schematic 4×422K+1K divider → 130mV RMS @ 220V.
+            # CS5490 voltage channel full-scale = 250mVpeak = 176.78mVrms.
+            # V_FULLSCALE = 220 × (176.78 / 130) ≈ 299V
+            V_FULLSCALE = 299.0
 
-            # Page 16 measurement registers
-            v_raw  = cs_read_reg(0x10, 0x10)  # VRMS
-            i_raw  = cs_read_reg(0x10, 0x0F)  # IRMS
-            p_raw  = cs_read_reg(0x10, 0x05)  # P_AVG (signed)
-            i_inst = cs_read_reg(0x10, 0x00)  # I instantaneous (current channel diagnostic)
-            igain  = cs_read_reg(0x10, 0x07)  # I_GAIN register
-
-            logger.info(f"CS5490 RAW: VRMS=0x{v_raw or 0:06X}({v_raw})"
-                        f"  IRMS=0x{i_raw or 0:06X}({i_raw})"
-                        f"  P_AVG=0x{p_raw or 0:06X}({p_raw})"
-                        f"  I_inst=0x{i_inst or 0:06X}  I_GAIN=0x{igain or 0:06X}")
-
-            # Schematic: 4×422K + 1K divider → 130mV RMS at CS5490 VIN for 220V line.
-            # CS5490 VREF≈1.2V peak → full-scale RMS = 1.2/√2 = 0.849V → V_FULLSCALE = 220×(0.849/0.130) ≈ 1436V
-            # Tune this value against a calibrated voltage reference.
-            V_FULLSCALE = 1436.0
-            # I_FULLSCALE: depends on CT ratio and burden resistor (R3).
-            # R3=0Ω on schematic → burden resistor not populated; replace with actual value and calibrate.
-            I_FULLSCALE = 32.0
+            # Current: 10x PGA gain (default IPGA=00 in Config0), full-scale = 250mVpeak = 176.78mVrms.
+            # I_FULLSCALE = 176.78mV / R_shunt.  Set R_SHUNT to actual shunt resistance in ohms.
+            R_SHUNT = 0.001   # TODO: set actual shunt resistance (ohms) — calibrate against known load
+            I_FULLSCALE = 0.17678 / R_SHUNT
 
             if v_raw is not None:
                 result["voltage"] = (v_raw / 0xFFFFFF) * V_FULLSCALE
@@ -205,7 +208,7 @@ class STM32HardwareAPI(HardwareAPI):
 
         except Exception as e:
             logger.error(f"CS5490 readout failed: {e}")
-            self._cs5490 = None  # Mark as dead; reinit on next startup
+            self._cs5490 = None
 
         return result
 

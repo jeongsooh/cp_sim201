@@ -117,19 +117,31 @@ class STM32HardwareAPI(HardwareAPI):
             s.reset_input_buffer()
 
             s.write(b'\xC1')         # Software Reset instruction (0xC0|0x01)
-            time.sleep(0.5)          # Wait for internal initialization sequence
+            time.sleep(1.0)          # Wait for internal initialization sequence (extended for safety)
             s.reset_input_buffer()
 
-            # Set Config0: IPGA=10 (50x gain) for better resolution with 300μΩ shunt.
-            # Config0 default=0xC02000; bits[7:6]=IPGA → 10=50x → byte0=0x80 → 0xC02080
-            # Page 0, addr 0x00: write cmd = 0x40|0x00 = 0x40
             import time as _time
-            s.write(bytes([0x80 | 0x00]))   # Page select page 0
-            _time.sleep(0.06)
-            s.write(bytes([0x40 | 0x00]))   # Write Config0 (addr 0x00)
-            _time.sleep(0.06)
-            s.write(bytes([0xC0, 0x20, 0x80]))  # 0xC02080: IPGA=10 (50x), rest default
-            _time.sleep(0.06)
+
+            def _write_reg(page, addr, b0, b1, b2):
+                """Write a 24-bit value to a CS5490 register."""
+                s.write(bytes([0x80 | page]))   # Page select
+                _time.sleep(0.06)
+                s.write(bytes([0x40 | addr]))   # Write command
+                _time.sleep(0.06)
+                s.write(bytes([b0, b1, b2]))    # 3 data bytes MSB first
+                _time.sleep(0.06)
+
+            # Config0 (Page 0, addr 0x00): set IPGA=10 (50x gain).
+            # Default=0xC02000; IPGA at bits[7:6] of LSB → 10=50x → LSB=0x80.
+            _write_reg(0x00, 0x00, 0xC0, 0x20, 0x80)
+
+            # IGAIN (Page 16, addr 0x24): explicitly restore default 0x400000.
+            # After reset this should be 0x400000, but write explicitly to ensure.
+            _write_reg(0x10, 0x24, 0x40, 0x00, 0x00)
+
+            # VGAIN (Page 16, addr 0x26): same as IGAIN.
+            _write_reg(0x10, 0x26, 0x40, 0x00, 0x00)
+
             s.reset_input_buffer()
 
             s.write(b'\xD5')         # Start Continuous Conversions (0xC0|0x15)

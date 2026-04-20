@@ -151,9 +151,11 @@ class STM32HardwareAPI(HardwareAPI):
             import time
             s = self._cs5490
 
-            # Re-sync UART framing before each read batch (no reset, no stop conversions)
-            s.write(b'\xFF\xFF\xFF\xFE')
-            time.sleep(0.08)
+            # Re-sync UART framing before each read batch.
+            # Use 0xFF×5 only — 0xFE at end of sync is a CS5490 special instruction
+            # that corrupts register state without a following software reset.
+            s.write(b'\xFF\xFF\xFF\xFF\xFF')
+            time.sleep(0.10)
             s.reset_input_buffer()
 
             def cs_read_reg(page, reg):
@@ -179,7 +181,12 @@ class STM32HardwareAPI(HardwareAPI):
                         f"  P_AVG=0x{p_raw or 0:06X}({p_raw})"
                         f"  I_inst=0x{i_inst or 0:06X}  I_GAIN=0x{igain or 0:06X}")
 
-            V_FULLSCALE = 250.0
+            # Schematic: 4×422K + 1K divider → 130mV RMS at CS5490 VIN for 220V line.
+            # CS5490 VREF≈1.2V peak → full-scale RMS = 1.2/√2 = 0.849V → V_FULLSCALE = 220×(0.849/0.130) ≈ 1436V
+            # Tune this value against a calibrated voltage reference.
+            V_FULLSCALE = 1436.0
+            # I_FULLSCALE: depends on CT ratio and burden resistor (R3).
+            # R3=0Ω on schematic → burden resistor not populated; replace with actual value and calibrate.
             I_FULLSCALE = 32.0
 
             if v_raw is not None:

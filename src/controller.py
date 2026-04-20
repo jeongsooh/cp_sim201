@@ -82,6 +82,46 @@ class ChargingStationController:
             "TokenReader": {
                 "Enabled": ("true", "ReadWrite"),
             },
+            # CSMS 설정 가능 파라미터
+            "SampledDataCtrlr": {
+                "SampledDataTxUpdatedInterval":   ("60",    "ReadWrite"),
+                "SampledDataTxUpdatedMeasurands": ("Current.Import,Voltage,Energy.Active.Import.Register", "ReadWrite"),
+                "SampledDataTxStartedMeasurands": ("Energy.Active.Import.Register", "ReadWrite"),
+                "SampledDataTxEndedMeasurands":   ("Energy.Active.Import.Register", "ReadWrite"),
+            },
+            "HeartbeatCtrlr": {
+                "HeartbeatInterval": ("60", "ReadWrite"),
+            },
+            "TxCtrlr": {
+                "TxStartPoint":             ("Authorized,EVConnected", "ReadWrite"),
+                "TxStopPoint":              ("Authorized,EVConnected", "ReadWrite"),
+                "StopTxOnEVSideDisconnect": ("true", "ReadWrite"),
+                "EVConnectionTimeOut":      ("60",   "ReadWrite"),
+            },
+            "AuthCtrlr": {
+                "AuthorizeRemoteStart":         ("true",  "ReadWrite"),
+                "LocalAuthorizeOffline":        ("true",  "ReadWrite"),
+                "LocalPreAuthorize":            ("false", "ReadWrite"),
+                "OfflineTxForUnknownIdEnabled": ("false", "ReadWrite"),
+            },
+            "OCPPCommCtrlr": {
+                "MessageAttempts":        ("3",  "ReadWrite"),
+                "MessageAttemptInterval": ("30", "ReadWrite"),
+                "OfflineThreshold":       ("60", "ReadWrite"),
+            },
+            "LocalAuthListCtrlr": {
+                "Enabled": ("true", "ReadWrite"),
+                "Entries": ("100",  "ReadOnly"),
+            },
+            "SmartChargingCtrlr": {
+                "Enabled": ("false", "ReadWrite"),
+            },
+            "ReservationCtrlr": {
+                "Enabled": ("true", "ReadWrite"),
+            },
+            "SecurityCtrlr": {
+                "SecurityProfile": ("0", "ReadWrite"),
+            },
         })
 
         # Block B — Core / Provisioning
@@ -162,6 +202,31 @@ class ChargingStationController:
         self.ocpp_client.register_action_handler("CertificateSigned",           self.handle_certificate_signed)
 
     # ------------------------------------------------------------------
+    # Device Model 헬퍼
+    # ------------------------------------------------------------------
+
+    def _get_param(self, component: str, variable: str, default: str = "") -> str:
+        entry = self.device_model.get(component, {}).get(variable)
+        return entry[0] if entry else default
+
+    def _get_int(self, component: str, variable: str, default: int) -> int:
+        try:
+            return int(self._get_param(component, variable, str(default)))
+        except (ValueError, TypeError):
+            return default
+
+    def _get_bool(self, component: str, variable: str, default: bool) -> bool:
+        return self._get_param(component, variable, str(default).lower()) == "true"
+
+    def _apply_variable_change(self, component: str, variable: str, value: str) -> None:
+        """SetVariables 수신 후 즉시 동작에 반영이 필요한 파라미터를 처리한다."""
+        if component == "HeartbeatCtrlr" and variable == "HeartbeatInterval":
+            if self._heartbeat_task:
+                self._heartbeat_task.cancel()
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                logger.info(f"HeartbeatInterval changed to {value}s — task restarted")
+
+    # ------------------------------------------------------------------
     # 부트 / 하트비트
     # ------------------------------------------------------------------
 
@@ -180,13 +245,16 @@ class ChargingStationController:
             await self.connector_hal.on_status_change()
 
             interval = res.get("interval", 300)
+            self.device_model["HeartbeatCtrlr"]["HeartbeatInterval"] = (str(interval), "ReadWrite")
+            save_device_model(self.device_model)
             if not self._heartbeat_task:
-                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(interval))
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         else:
             logger.warning("BootNotification Not Accepted.")
 
-    async def _heartbeat_loop(self, interval: int) -> None:
+    async def _heartbeat_loop(self) -> None:
         while True:
+            interval = self._get_int("HeartbeatCtrlr", "HeartbeatInterval", 60)
             await asyncio.sleep(interval)
             try:
                 await self.ocpp_client.call("Heartbeat", {})
@@ -244,6 +312,7 @@ class ChargingStationController:
                     status = "Rejected"
                 else:
                     self.device_model[comp][var] = (val, mutability)
+                    self._apply_variable_change(comp, var, val)
                     status = "Accepted"
             else:
                 status = "UnknownVariable"
@@ -358,15 +427,20 @@ class ChargingStationController:
 
         id_token = payload["idToken"]
         logger.info(f"RequestStartTransaction: authorizing token {id_token.get('idToken')}")
-        try:
-            res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
-            if res and res.get("idTokenInfo", {}).get("status") == "Accepted":
-                self.is_authorized = True
-                asyncio.create_task(self._try_start_transaction())
-                return {"status": "Accepted"}
-        except Exception as e:
-            logger.error(f"Authorize failed during RequestStartTransaction: {e}")
-        return {"status": "Rejected"}
+
+        if self._get_bool("AuthCtrlr", "AuthorizeRemoteStart", True):
+            try:
+                res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
+                if not (res and res.get("idTokenInfo", {}).get("status") == "Accepted"):
+                    logger.warning("RequestStartTransaction: Authorize rejected")
+                    return {"status": "Rejected"}
+            except Exception as e:
+                logger.error(f"Authorize failed during RequestStartTransaction: {e}")
+                return {"status": "Rejected"}
+
+        self.is_authorized = True
+        asyncio.create_task(self._try_start_transaction())
+        return {"status": "Accepted"}
 
     async def handle_request_stop_transaction(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """TC_F_*: Remote stop transaction from CSMS"""
@@ -612,8 +686,11 @@ class ChargingStationController:
         logger.info("Cable unplugged. Connector Available.")
         self.connector_hal.status = "Available"
         if self.transaction_id:
-            logger.info("Transaction active during unplug. Stopping transaction (EVDisconnected).")
-            await self.stop_transaction("EVDisconnected")
+            if self._get_bool("TxCtrlr", "StopTxOnEVSideDisconnect", True):
+                logger.info("Transaction active during unplug. Stopping transaction (EVDisconnected).")
+                await self.stop_transaction("EVDisconnected")
+            else:
+                logger.info("Cable unplugged but StopTxOnEVSideDisconnect=false — transaction continues.")
 
         payload = {
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -629,7 +706,8 @@ class ChargingStationController:
     async def _meter_values_loop(self, transaction_id: str) -> None:
         """TC_J_02_CS: Periodically reports TransactionEvent(Updated) with MeterValues"""
         while self.transaction_id == transaction_id:
-            await asyncio.sleep(60)
+            interval = self._get_int("SampledDataCtrlr", "SampledDataTxUpdatedInterval", 60)
+            await asyncio.sleep(interval)
 
             meter_data = self.power_contactor_hal.read_meter_values()
             real_power = meter_data.get("power", 0.0)

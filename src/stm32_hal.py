@@ -70,20 +70,43 @@ class STM32HardwareAPI(HardwareAPI):
         self.set_cp_pwm(1, 100)
 
     def _init_cs5490(self):
-        """Open persistent serial port, sync, reset, and start continuous conversions."""
+        """Open persistent serial port, sync, reset, configure gains, and start continuous conversions."""
         import os, serial, time
         if not os.path.exists('/dev/ttySTM5'):
             return
         logger.info("Initializing CS5490 Energy Meter via /dev/ttySTM5...")
         try:
-            self._cs5490 = serial.Serial('/dev/ttySTM5', 600, timeout=1.0)
-            self._cs5490.write(b'\xFF\xFF\xFF\xFE')
-            time.sleep(0.1)
-            self._cs5490.write(b'\x5E')   # Software Reset
-            time.sleep(0.5)
-            self._cs5490.write(b'\xD5')   # Start Continuous Conversions
-            time.sleep(1.5)               # Wait for first full conversion cycle
-            self._cs5490.reset_input_buffer()
+            s = serial.Serial('/dev/ttySTM5', 600, timeout=1.0)
+            self._cs5490 = s
+
+            # Sync + Software Reset + Start Continuous Conversions
+            s.write(b'\xFF\xFF\xFF\xFE'); time.sleep(0.1)
+            s.write(b'\x5E');            time.sleep(0.7)   # Software Reset
+            s.write(b'\xD5');            time.sleep(1.5)   # Start Continuous Conversions
+            s.reset_input_buffer()
+
+            # Write gain registers explicitly — software reset may leave them at 0
+            def cs_write_reg(page, reg, value_24bit):
+                s.write(bytes([0x80 | page]))              # Page select
+                time.sleep(0.06)
+                s.write(bytes([reg & 0x1F]))               # Write (bit5=0)
+                time.sleep(0.06)
+                s.write(value_24bit.to_bytes(3, 'big'))    # 3-byte payload
+                time.sleep(0.06)
+
+            def cs_read_reg(page, reg):
+                s.reset_input_buffer()
+                s.write(bytes([0x80 | page])); time.sleep(0.06)
+                s.write(bytes([0x20 | reg]));  time.sleep(0.06)
+                resp = s.read(3)
+                return int.from_bytes(resp, 'big') if len(resp) == 3 else None
+
+            cs_write_reg(0x10, 0x07, 0x400000)   # I_GAIN = unity
+            cs_write_reg(0x10, 0x09, 0x400000)   # V_GAIN = unity
+
+            igain = cs_read_reg(0x10, 0x07)
+            vgain = cs_read_reg(0x10, 0x09)
+            logger.info(f"CS5490 gain verify: I_GAIN=0x{igain or 0:06X}  V_GAIN=0x{vgain or 0:06X}")
             logger.info("CS5490 initialized, continuous conversions running.")
         except Exception as e:
             logger.error(f"Failed to initialize CS5490: {e}")
@@ -127,6 +150,11 @@ class STM32HardwareAPI(HardwareAPI):
         try:
             import time
             s = self._cs5490
+
+            # Re-sync UART framing before each read batch (no reset, no stop conversions)
+            s.write(b'\xFF\xFF\xFF\xFE')
+            time.sleep(0.08)
+            s.reset_input_buffer()
 
             def cs_read_reg(page, reg):
                 s.reset_input_buffer()

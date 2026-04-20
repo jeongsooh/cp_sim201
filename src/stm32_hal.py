@@ -188,9 +188,11 @@ class STM32HardwareAPI(HardwareAPI):
             V_FULLSCALE = 299.0
 
             # Current: 10x PGA gain (default IPGA=00 in Config0), full-scale = 250mVpeak = 176.78mVrms.
-            # I_FULLSCALE = 176.78mV / R_shunt.  Set R_SHUNT to actual shunt resistance in ohms.
-            R_SHUNT = 0.001   # TODO: set actual shunt resistance (ohms) — calibrate against known load
-            I_FULLSCALE = 0.17678 / R_SHUNT
+            # R_shunt = 300μΩ → I_FULLSCALE = 176.78mV / 0.0003Ω = 589.3A
+            # Note: at 32A EV charging, ADC is only ~5.4% of full scale.
+            # Consider switching to 50x PGA (IPGA=10 in Config0) for 5x better resolution.
+            R_SHUNT = 0.0003  # 300 micro-ohm shunt resistor
+            I_FULLSCALE = 0.17678 / R_SHUNT  # = 589.3A
 
             if v_raw is not None:
                 result["voltage"] = (v_raw / 0xFFFFFF) * V_FULLSCALE

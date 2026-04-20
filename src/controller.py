@@ -89,6 +89,11 @@ class ChargingStationController:
                 "SampledDataTxStartedMeasurands": ("Energy.Active.Import.Register", "ReadWrite"),
                 "SampledDataTxEndedMeasurands":   ("Energy.Active.Import.Register", "ReadWrite"),
             },
+            "AlignedDataCtrlr": {
+                "AlignedDataInterval":          ("0",                                  "ReadWrite"),
+                "AlignedDataMeasurands":        ("Energy.Active.Import.Register",      "ReadWrite"),
+                "AlignedDataTxEndedMeasurands": ("Energy.Active.Import.Register",      "ReadWrite"),
+            },
             "HeartbeatCtrlr": {
                 "HeartbeatInterval": ("60", "ReadWrite"),
             },
@@ -217,6 +222,31 @@ class ChargingStationController:
 
     def _get_bool(self, component: str, variable: str, default: bool) -> bool:
         return self._get_param(component, variable, str(default).lower()) == "true"
+
+    _MEASURAND_META = {
+        "Voltage":                       ("voltage", "V"),
+        "Current.Import":                ("current", "A"),
+        "Power.Active.Import":           ("power",   "W"),
+        "Energy.Active.Import.Register": (None,      "Wh"),  # uses accumulated energy_wh
+    }
+
+    def _build_sampled_values(self, measurands_str: str, meter_data: dict,
+                              context: str, energy_wh: float) -> list:
+        """Build OCPP 2.0.1 sampledValue list from a comma-separated measurands string."""
+        result = []
+        for m in measurands_str.split(","):
+            m = m.strip()
+            key, unit = self._MEASURAND_META.get(m, (None, None))
+            if unit is None:
+                continue
+            value = energy_wh if key is None else meter_data.get(key, 0.0)
+            result.append({
+                "value": str(round(value, 3)),
+                "context": context,
+                "measurand": m,
+                "unitOfMeasure": {"unit": unit},
+            })
+        return result
 
     def _apply_variable_change(self, component: str, variable: str, value: str) -> None:
         """SetVariables 수신 후 즉시 동작에 반영이 필요한 파라미터를 처리한다."""
@@ -711,10 +741,12 @@ class ChargingStationController:
 
             meter_data = self.power_contactor_hal.read_meter_values()
             real_power = meter_data.get("power", 0.0)
-            self.meter_value += real_power / 60.0
+            self.meter_value += real_power * (interval / 3600.0)  # Wh
 
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             self._tx_seq_no += 1
+            measurands = self._get_param("SampledDataCtrlr", "SampledDataTxUpdatedMeasurands",
+                                         "Energy.Active.Import.Register")
             payload = {
                 "eventType": "Updated",
                 "timestamp": now_iso,
@@ -726,7 +758,8 @@ class ChargingStationController:
                 "meterValue": [
                     {
                         "timestamp": now_iso,
-                        "sampledValue": [{"value": self.meter_value}]
+                        "sampledValue": self._build_sampled_values(
+                            measurands, meter_data, "Sample.Periodic", self.meter_value)
                     }
                 ]
             }
@@ -743,6 +776,9 @@ class ChargingStationController:
                 self._state_c_active = False
                 self._tx_seq_no = 0
                 now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                meter_data = self.power_contactor_hal.read_meter_values()
+                measurands = self._get_param("SampledDataCtrlr", "SampledDataTxStartedMeasurands",
+                                             "Energy.Active.Import.Register")
                 payload = {
                     "eventType": "Started",
                     "timestamp": now_iso,
@@ -754,7 +790,8 @@ class ChargingStationController:
                     "meterValue": [
                         {
                             "timestamp": now_iso,
-                            "sampledValue": [{"value": self.meter_value}]
+                            "sampledValue": self._build_sampled_values(
+                                measurands, meter_data, "Transaction.Begin", self.meter_value)
                         }
                     ]
                 }
@@ -803,6 +840,9 @@ class ChargingStationController:
             }
             trigger_reason = trigger_reason_map.get(stopped_reason, "StopAuthorized")
 
+            meter_data = self.power_contactor_hal.read_meter_values()
+            measurands = self._get_param("SampledDataCtrlr", "SampledDataTxEndedMeasurands",
+                                         "Energy.Active.Import.Register")
             payload = {
                 "eventType": "Ended",
                 "timestamp": now_iso,
@@ -815,7 +855,8 @@ class ChargingStationController:
                 "meterValue": [
                     {
                         "timestamp": now_iso,
-                        "sampledValue": [{"value": self.meter_value}]
+                        "sampledValue": self._build_sampled_values(
+                            measurands, meter_data, "Transaction.End", self.meter_value)
                     }
                 ]
             }

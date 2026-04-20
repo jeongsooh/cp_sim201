@@ -120,6 +120,18 @@ class STM32HardwareAPI(HardwareAPI):
             time.sleep(0.5)          # Wait for internal initialization sequence
             s.reset_input_buffer()
 
+            # Set Config0: IPGA=10 (50x gain) for better resolution with 300μΩ shunt.
+            # Config0 default=0xC02000; bits[7:6]=IPGA → 10=50x → byte0=0x80 → 0xC02080
+            # Page 0, addr 0x00: write cmd = 0x40|0x00 = 0x40
+            import time as _time
+            s.write(bytes([0x80 | 0x00]))   # Page select page 0
+            _time.sleep(0.06)
+            s.write(bytes([0x40 | 0x00]))   # Write Config0 (addr 0x00)
+            _time.sleep(0.06)
+            s.write(bytes([0xC0, 0x20, 0x80]))  # 0xC02080: IPGA=10 (50x), rest default
+            _time.sleep(0.06)
+            s.reset_input_buffer()
+
             s.write(b'\xD5')         # Start Continuous Conversions (0xC0|0x15)
             time.sleep(1.5)          # Default SampleCount=4000, OWR=4000Hz → 1s per cycle
             s.reset_input_buffer()
@@ -127,7 +139,7 @@ class STM32HardwareAPI(HardwareAPI):
             igain = self._cs5490_read_reg(0x10, 0x24)
             vgain = self._cs5490_read_reg(0x10, 0x26)
             logger.info(f"CS5490 ready: I_GAIN=0x{igain or 0:06X} V_GAIN=0x{vgain or 0:06X} (expect 0x400000)")
-            logger.info("CS5490 continuous conversions started.")
+            logger.info("CS5490 continuous conversions started (50x PGA, I_FULLSCALE=117.8A).")
         except Exception as e:
             logger.error(f"Failed to initialize CS5490: {e}")
             self._cs5490 = None
@@ -162,8 +174,8 @@ class STM32HardwareAPI(HardwareAPI):
 
         Voltage full-scale: 250mVpeak / (1K/1689K divider) → 220V gives 130mV RMS
           V_FULLSCALE = 220 × (176.78mV / 130mV) ≈ 299V
-        Current full-scale: 250mVpeak (10x PGA, default Config0 IPGA=00)
-          I_FULLSCALE = 176.78mV_rms / R_shunt_ohms  — set R_SHUNT below.
+        Current full-scale: 50x PGA (Config0 IPGA=10), full-scale = 50mVpeak = 35.35mVrms.
+          I_FULLSCALE = 35.35mV_rms / R_shunt_ohms  — set R_SHUNT below.
         """
         result = {"voltage": 0.0, "current": 0.0, "power": 0.0, "energy": 0.0}
         if evse_id != 1 or self._cs5490 is None:
@@ -187,12 +199,10 @@ class STM32HardwareAPI(HardwareAPI):
             # V_FULLSCALE = 220 × (176.78 / 130) ≈ 299V
             V_FULLSCALE = 299.0
 
-            # Current: 10x PGA gain (default IPGA=00 in Config0), full-scale = 250mVpeak = 176.78mVrms.
-            # R_shunt = 300μΩ → I_FULLSCALE = 176.78mV / 0.0003Ω = 589.3A
-            # Note: at 32A EV charging, ADC is only ~5.4% of full scale.
-            # Consider switching to 50x PGA (IPGA=10 in Config0) for 5x better resolution.
+            # Current: 50x PGA (IPGA=10 in Config0), full-scale = 50mVpeak = 35.35mVrms.
+            # R_shunt = 300μΩ → I_FULLSCALE = 35.35mV / 0.0003Ω = 117.8A
             R_SHUNT = 0.0003  # 300 micro-ohm shunt resistor
-            I_FULLSCALE = 0.17678 / R_SHUNT  # = 589.3A
+            I_FULLSCALE = 0.03535 / R_SHUNT  # 50x PGA: 35.35mVrms / 0.0003Ω = 117.8A
 
             if v_raw is not None:
                 result["voltage"] = (v_raw / 0xFFFFFF) * V_FULLSCALE

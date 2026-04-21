@@ -307,8 +307,9 @@ class ChargingStationController:
             self._first_connect = False
             await self.boot_routine(reason="PowerUp")
         else:
-            # 단순 연결 재연결(connection drop) — BootNotification 불필요
-            logger.info("Reconnected after connection drop, skipping BootNotification.")
+            # 단순 연결 재연결(connection drop) — BootNotification 불필요, StatusNotification 전송
+            logger.info("Reconnected after connection drop, sending StatusNotification.")
+            await self.connector_hal.on_status_change(force=True)
 
     async def _heartbeat_loop(self) -> None:
         while True:

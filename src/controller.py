@@ -31,6 +31,7 @@ class ChargingStationController:
         self._heartbeat_task = None
         self._meter_task = None
         self._pending_reset: bool = False
+        self._first_connect: bool = True
 
         # Block G: EVSE 가용 상태
         self.is_evse_available: bool = True
@@ -297,10 +298,17 @@ class ChargingStationController:
             logger.warning("BootNotification Not Accepted.")
 
     async def _on_reconnect(self) -> None:
-        """재연결 후 BootNotification 전송 (Reset 후 RemoteReset reason 사용)"""
-        reason = "RemoteReset" if self._pending_reset else "PowerUp"
-        self._pending_reset = False
-        await self.boot_routine(reason=reason)
+        """연결 성립 시 호출. 최초 부팅 또는 Reset 후에만 BootNotification 전송."""
+        if self._pending_reset:
+            self._pending_reset = False
+            self._first_connect = False
+            await self.boot_routine(reason="RemoteReset")
+        elif self._first_connect:
+            self._first_connect = False
+            await self.boot_routine(reason="PowerUp")
+        else:
+            # 단순 연결 재연결(connection drop) — BootNotification 불필요
+            logger.info("Reconnected after connection drop, skipping BootNotification.")
 
     async def _heartbeat_loop(self) -> None:
         while True:

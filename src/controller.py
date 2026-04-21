@@ -13,7 +13,7 @@ from .persistence import load_device_model, save_device_model
 logger = logging.getLogger(__name__)
 
 class ChargingStationController:
-    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs"):
+    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0):
         self.ocpp_client = ocpp_client
         self.evse_id = 1
         self.connector_id = 1
@@ -126,7 +126,7 @@ class ChargingStationController:
                 "Enabled": ("true", "ReadWrite"),
             },
             "SecurityCtrlr": {
-                "SecurityProfile": ("0", "ReadWrite"),
+                "SecurityProfile": (str(security_profile), "ReadWrite"),
             },
         })
 

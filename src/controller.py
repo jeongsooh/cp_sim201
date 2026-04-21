@@ -117,6 +117,7 @@ class ChargingStationController:
                 "OfflineThreshold":                 ("60",   "ReadWrite"),
                 "NetworkProfileConnectionAttempts": ("3",    "ReadWrite"),
                 "ActiveNetworkProfile":             ("0",    "ReadOnly"),
+                "NetworkConfigurationPriority":     ("0",    "ReadWrite"),
                 "QueueAllMessages":                 ("false","ReadWrite"),
                 "RetryBackOffWaitMinimum":          ("10",   "ReadWrite"),
                 "RetryBackOffRepeatTimes":          ("5",    "ReadWrite"),
@@ -359,7 +360,7 @@ class ChargingStationController:
             if var in comp_data:
                 _, mutability = comp_data[var]
                 if mutability == "ReadOnly":
-                    status = "Rejected"
+                    status = "ReadOnly"
                 else:
                     self.device_model[comp][var] = (val, mutability)
                     self._apply_variable_change(comp, var, val)

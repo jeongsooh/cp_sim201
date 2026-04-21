@@ -38,6 +38,7 @@ class OCPPClient:
         self._is_running = False
 
         self._action_handlers: Dict[str, Callable[[Dict], Awaitable[Dict]]] = {}
+        self._on_connect_callback: Optional[Callable[[], Awaitable[None]]] = None
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
 
@@ -79,6 +80,9 @@ class OCPPClient:
     ) -> None:
         self._action_handlers[action] = handler
 
+    def register_on_connect(self, callback: Callable[[], Awaitable[None]]) -> None:
+        self._on_connect_callback = callback
+
     async def connect(self) -> None:
         self._is_running = True
         attempt = 0
@@ -92,6 +96,8 @@ class OCPPClient:
                 )
                 logger.info("Connection established.")
                 attempt = 0
+                if self._on_connect_callback:
+                    asyncio.create_task(self._on_connect_callback())
                 # G4: 재연결 직후 오프라인 큐 재전송
                 asyncio.create_task(self._drain_offline_queue())
                 self._listen_task = asyncio.create_task(self._listen())

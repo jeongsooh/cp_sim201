@@ -140,17 +140,14 @@ async def main() -> None:
     client = OCPPClient(cfg.station_id, cfg.csms_url, ws_kwargs=cfg.build_ws_kwargs())
     controller = ChargingStationController(client, cert_dir=cfg.cert_dir, security_profile=cfg.security_profile)
 
-    # 2. Connect to CSMS in the background
+    # 2. Connect to CSMS in the background (on_connect callback sends BootNotification)
     client_task = asyncio.create_task(client.connect())
 
-    # Wait briefly for connection (in production, should wait for state flag)
+    # Wait briefly for connection and BootNotification to complete
     logger.info("Connecting to CSMS...")
-    await asyncio.sleep(3) 
+    await asyncio.sleep(5)
 
-    # 3. Trigger initial Boot Notification
-    await controller.boot_routine()
-
-    # 4. Spin up hardware reading mechanisms
+    # 3. Spin up hardware reading mechanisms
     rfid_task = asyncio.create_task(rfid_monitor(controller))
     prox_task = asyncio.create_task(proximity_monitor(controller))
     adc_task  = asyncio.create_task(cp_adc_monitor(controller))

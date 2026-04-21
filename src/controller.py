@@ -30,6 +30,7 @@ class ChargingStationController:
 
         self._heartbeat_task = None
         self._meter_task = None
+        self._pending_reset: bool = False
 
         # Block G: EVSE 가용 상태
         self.is_evse_available: bool = True
@@ -207,6 +208,8 @@ class ChargingStationController:
         self.ocpp_client.register_action_handler("GetCertificateStatus",        self.handle_get_certificate_status)
         self.ocpp_client.register_action_handler("CertificateSigned",           self.handle_certificate_signed)
 
+        self.ocpp_client.register_on_connect(self._on_reconnect)
+
     # ------------------------------------------------------------------
     # Device Model 헬퍼
     # ------------------------------------------------------------------
@@ -261,10 +264,10 @@ class ChargingStationController:
     # 부트 / 하트비트
     # ------------------------------------------------------------------
 
-    async def boot_routine(self) -> None:
-        logger.info("Executing Boot Routine")
+    async def boot_routine(self, reason: str = "PowerUp") -> None:
+        logger.info(f"Executing Boot Routine (reason={reason})")
         payload = {
-            "reason": "PowerUp",
+            "reason": reason,
             "chargingStation": {
                 "model": "AC_SIMULATOR_201",
                 "vendorName": "TEST_CORP"
@@ -278,10 +281,16 @@ class ChargingStationController:
             interval = res.get("interval", 300)
             self.device_model["HeartbeatCtrlr"]["HeartbeatInterval"] = (str(interval), "ReadWrite")
             save_device_model(self.device_model)
-            if not self._heartbeat_task:
+            if not self._heartbeat_task or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         else:
             logger.warning("BootNotification Not Accepted.")
+
+    async def _on_reconnect(self) -> None:
+        """재연결 후 BootNotification 전송 (Reset 후 RemoteReset reason 사용)"""
+        reason = "RemoteReset" if self._pending_reset else "PowerUp"
+        self._pending_reset = False
+        await self.boot_routine(reason=reason)
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -301,6 +310,7 @@ class ChargingStationController:
         """TC_B_08_CS: Handles incoming ResetRequest from CSMS"""
         reset_type = payload.get("type", "Immediate")
         logger.info(f"Received ResetRequest: {reset_type}")
+        self._pending_reset = True
         return {"status": "Accepted"}
 
     async def handle_get_variables(self, payload: Dict[str, Any]) -> Dict[str, Any]:

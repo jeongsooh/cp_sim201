@@ -131,9 +131,10 @@ class STM32HardwareAPI(HardwareAPI):
                 s.write(bytes([b0, b1, b2]))    # 3 data bytes MSB first
                 _time.sleep(0.06)
 
-            # Config0 (Page 0, addr 0x00): set IPGA=10 (50x gain).
-            # Default=0xC02000; IPGA at bits[7:6] of LSB → 10=50x → LSB=0x80.
-            _write_reg(0x00, 0x00, 0xC0, 0x20, 0x80)
+            # Config0 (Page 0, addr 0x00): IPGA=00 (10x gain, default).
+            # 10x PGA: I_FULLSCALE = 176.78mVrms / (10 × 0.0003Ω) = 58.93A.
+            # 50x PGA saturates at 11.79A — too low for 32A EV charging.
+            _write_reg(0x00, 0x00, 0xC0, 0x20, 0x00)
 
             # IGAIN (Page 16, addr 0x24): explicitly restore default 0x400000.
             # After reset this should be 0x400000, but write explicitly to ensure.
@@ -151,7 +152,7 @@ class STM32HardwareAPI(HardwareAPI):
             igain = self._cs5490_read_reg(0x10, 0x24)
             vgain = self._cs5490_read_reg(0x10, 0x26)
             logger.info(f"CS5490 ready: I_GAIN=0x{igain or 0:06X} V_GAIN=0x{vgain or 0:06X} (expect 0x400000)")
-            logger.info("CS5490 continuous conversions started (50x PGA, I_FULLSCALE=117.8A).")
+            logger.info("CS5490 continuous conversions started (10x PGA, I_FULLSCALE=58.93A).")
         except Exception as e:
             logger.error(f"Failed to initialize CS5490: {e}")
             self._cs5490 = None
@@ -187,8 +188,9 @@ class STM32HardwareAPI(HardwareAPI):
         Voltage full-scale: 250mVpeak / (1K/1689K divider) → 220V gives 130mV RMS
           Theoretical V_FULLSCALE = 299V, but observed reads ~102V at 220V.
           Empirical calibration factor ≈ 2.14 → V_FULLSCALE set to 640V.
-        Current full-scale: 50x PGA (Config0 IPGA=10), full-scale = 50mVpeak = 35.35mVrms.
-          I_FULLSCALE = 35.35mV_rms / R_shunt_ohms  — set R_SHUNT below.
+        Current full-scale: 10x PGA (Config0 IPGA=00, default).
+          I_FULLSCALE = 176.78mVrms / (PGA_gain × R_shunt) = 0.17678 / (10 × 0.0003) = 58.93A
+          50x PGA saturates at 11.79A — insufficient for 32A EV charging.
         """
         result = {"voltage": 0.0, "current": 0.0, "power": 0.0, "energy": 0.0}
         if evse_id != 1 or self._cs5490 is None:
@@ -215,10 +217,9 @@ class STM32HardwareAPI(HardwareAPI):
             # V_FULLSCALE = 299 × 2.14 ≈ 640V  (pending empirical measurement)
             V_FULLSCALE = 640.0
 
-            # Current: 50x PGA (IPGA=10 in Config0), full-scale = 50mVpeak = 35.35mVrms.
-            # R_shunt = 300μΩ → I_FULLSCALE = 35.35mV / 0.0003Ω = 117.8A
+            # Current: 10x PGA (IPGA=00 default). I_FULLSCALE = 176.78mVrms / (gain × R_shunt).
             R_SHUNT = 0.0003  # 300 micro-ohm shunt resistor
-            I_FULLSCALE = 0.03535 / R_SHUNT  # 50x PGA: 35.35mVrms / 0.0003Ω = 117.8A
+            I_FULLSCALE = 0.17678 / (10 * R_SHUNT)  # 10x PGA: 58.93A full-scale
 
             if v_raw is not None:
                 result["voltage"] = (v_raw / 0xFFFFFF) * V_FULLSCALE

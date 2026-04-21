@@ -53,10 +53,10 @@ class ConnectorHAL:
         is_plugged = HardwareAPI.check_proximity(self.connector_id)
         return "Occupied" if is_plugged else "Available"
 
-    async def on_status_change(self) -> None:
-        """이벤트: 플러그 체결 상태가 변경되었을 때 호출"""
+    async def on_status_change(self, force: bool = False) -> None:
+        """이벤트: 플러그 체결 상태가 변경되었을 때 호출. force=True면 변경 없어도 전송."""
         new_status = self.read_physical_connection()
-        if new_status != self.status:
+        if new_status != self.status or force:
             self.status = new_status
             if self.ocpp_client:
                 from datetime import datetime, timezone
@@ -66,7 +66,7 @@ class ConnectorHAL:
                     "evseId": self.evse_id,
                     "connectorId": self.connector_id,
                 }
-                logger.info(f"Connector {self.connector_id} status changed to {self.status}")
+                logger.info(f"Connector {self.connector_id} status → {self.status} (force={force})")
                 await self.ocpp_client.call("StatusNotification", payload)
 
 

@@ -276,7 +276,7 @@ class ChargingStationController:
         res = await self.ocpp_client.call("BootNotification", payload)
         if res and res.get("status") == "Accepted":
             logger.info("BootNotification Accepted.")
-            await self.connector_hal.on_status_change()
+            await self.connector_hal.on_status_change(force=True)
 
             interval = res.get("interval", 300)
             self.device_model["HeartbeatCtrlr"]["HeartbeatInterval"] = (str(interval), "ReadWrite")

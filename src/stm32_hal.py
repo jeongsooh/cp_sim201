@@ -19,6 +19,7 @@ class STM32HardwareAPI(HardwareAPI):
         self.req_relay = None
         self.req_prox = None
         self._cs5490 = None
+        self._cs5490_last_voltage = 220.0
 
         if not HAS_V2:
             logger.error("gpiod v2 API not found. Please ensure proper python3-gpiod is installed.")
@@ -222,14 +223,19 @@ class STM32HardwareAPI(HardwareAPI):
             I_FULLSCALE = 0.17678 / (10 * R_SHUNT)  # 10x PGA: 58.93A full-scale
 
             if v_raw is not None:
-                result["voltage"] = (v_raw / 0xFFFFFF) * V_FULLSCALE
+                v_candidate = (v_raw / 0xFFFFFF) * V_FULLSCALE
+                if 150.0 <= v_candidate <= 270.0:
+                    result["voltage"] = v_candidate
+                    self._cs5490_last_voltage = v_candidate
+                else:
+                    result["voltage"] = self._cs5490_last_voltage
+                    logger.warning(f"CS5490 VRMS out of range ({v_candidate:.1f}V), using last known {self._cs5490_last_voltage:.1f}V")
 
             if i_raw is not None:
                 result["current"] = (i_raw / 0xFFFFFF) * I_FULLSCALE
 
-            if p_raw is not None:
-                p_signed = p_raw if p_raw < 0x800000 else p_raw - 0x1000000
-                result["power"] = (p_signed / 0x7FFFFF) * (V_FULLSCALE * I_FULLSCALE)
+            # PAVG register is unreliable under EMI from 32A relay load; compute P = V × I
+            result["power"] = result["voltage"] * result["current"]
 
             logger.info(f"CS5490 SCALED: V={result['voltage']:.1f}V"
                         f"  I={result['current']:.2f}A"

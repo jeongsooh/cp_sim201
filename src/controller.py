@@ -112,9 +112,15 @@ class ChargingStationController:
                 "OfflineTxForUnknownIdEnabled": ("false", "ReadWrite"),
             },
             "OCPPCommCtrlr": {
-                "MessageAttempts":        ("3",  "ReadWrite"),
-                "MessageAttemptInterval": ("30", "ReadWrite"),
-                "OfflineThreshold":       ("60", "ReadWrite"),
+                "MessageAttempts":                  ("3",    "ReadWrite"),
+                "MessageAttemptInterval":           ("30",   "ReadWrite"),
+                "OfflineThreshold":                 ("60",   "ReadWrite"),
+                "NetworkProfileConnectionAttempts": ("3",    "ReadWrite"),
+                "ActiveNetworkProfile":             ("0",    "ReadOnly"),
+                "QueueAllMessages":                 ("false","ReadWrite"),
+                "RetryBackOffWaitMinimum":          ("10",   "ReadWrite"),
+                "RetryBackOffRepeatTimes":          ("5",    "ReadWrite"),
+                "RetryBackOffRandomRange":          ("10",   "ReadWrite"),
             },
             "LocalAuthListCtrlr": {
                 "Enabled": ("true", "ReadWrite"),
@@ -127,7 +133,10 @@ class ChargingStationController:
                 "Enabled": ("true", "ReadWrite"),
             },
             "SecurityCtrlr": {
-                "SecurityProfile": (str(security_profile), "ReadWrite"),
+                "SecurityProfile":        (str(security_profile), "ReadWrite"),
+                "AllowCSMSTLSWildcards":  ("false", "ReadWrite"),
+                "OrganizationName":       ("TEST_CORP", "ReadWrite"),
+                "CertificateEntries":     ("2",   "ReadOnly"),
             },
         })
 

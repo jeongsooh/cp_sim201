@@ -78,6 +78,9 @@ class ChargingStationController:
         self.installed_certificates: Dict[str, Dict] = {}
         # CertificateSigned로 수신한 클라이언트 인증서 경로 — 다음 재시작 시 적용
         self._pending_client_cert: Optional[str] = None
+        # TC_A_23_CS: SignCertificate → CertificateSigned 대기를 위한 이벤트
+        self._cert_signed_event: Optional[asyncio.Event] = None
+        self._cert_signing_task: Optional[asyncio.Task] = None
 
         # Block B: 장치 모델 (component → variable → (value, mutability))
         self.device_model = load_device_model({
@@ -154,6 +157,9 @@ class ChargingStationController:
                 "OrganizationName":       ("TEST_CORP", "ReadWrite"),
                 "CertificateEntries":     ("2",   "ReadOnly"),
                 "BasicAuthPassword":      ("",    "WriteOnly"),
+                # TC_A_23_CS: SignCertificate → CertificateSigned 대기/재시도 정책
+                "CertSigningWaitMinimum": ("30", "ReadWrite"),
+                "CertSigningRepeatTimes": ("3",  "ReadWrite"),
             },
         })
         # Force-override SecurityProfile after load_device_model so persisted "0" can't win
@@ -324,6 +330,47 @@ class ChargingStationController:
                 }
                 logger.info("BasicAuthPassword updated — scheduling reconnect with new credentials")
                 asyncio.create_task(self._reconnect_after_password_change())
+
+    async def _send_sign_certificate_with_retry(self, csr_pem: str) -> None:
+        """SignCertificate 전송 후 CertificateSigned가 도착할 때까지 대기한다.
+
+        CertSigningWaitMinimum 초 내 응답이 없으면 SignCertificate를 재전송한다.
+        최대 CertSigningRepeatTimes 회 재시도 (초기 전송 포함 총 1 + RepeatTimes 회).
+        [OCPP 2.0.1 TC_A_23_CS / Part 2 §A04]
+        """
+        wait_seconds = self._get_int("SecurityCtrlr", "CertSigningWaitMinimum", 30)
+        max_retries = self._get_int("SecurityCtrlr", "CertSigningRepeatTimes", 3)
+        total_attempts = max_retries + 1
+
+        for attempt in range(1, total_attempts + 1):
+            self._cert_signed_event = asyncio.Event()
+            try:
+                await self.ocpp_client.call("SignCertificate", {
+                    "csr": csr_pem,
+                    "certificateType": "ChargingStationCertificate",
+                })
+            except Exception as e:
+                logger.error(f"SignCertificate call failed on attempt {attempt}: {e}")
+
+            try:
+                await asyncio.wait_for(self._cert_signed_event.wait(), timeout=wait_seconds)
+                logger.info(
+                    f"CertificateSigned received on attempt {attempt}/{total_attempts}"
+                )
+                self._cert_signed_event = None
+                return
+            except asyncio.TimeoutError:
+                if attempt < total_attempts:
+                    logger.warning(
+                        f"CertificateSigned timeout after {wait_seconds}s "
+                        f"(attempt {attempt}/{total_attempts}) — retrying SignCertificate"
+                    )
+                else:
+                    logger.warning(
+                        f"CertificateSigned: {total_attempts} attempts exhausted, giving up"
+                    )
+
+        self._cert_signed_event = None
 
     async def _generate_csr_pem(self) -> str:
         """Generate a 2048-bit RSA CSR; save the private key for later CertificateSigned use."""
@@ -947,10 +994,12 @@ class ChargingStationController:
 
             elif requested == "SignChargingStationCertificate":
                 csr_pem = await self._generate_csr_pem()
-                await self.ocpp_client.call("SignCertificate", {
-                    "csr": csr_pem,
-                    "certificateType": "ChargingStationCertificate",
-                })
+                # TC_A_23_CS: CertificateSignedRequest 타임아웃 시 재시도
+                if self._cert_signing_task and not self._cert_signing_task.done():
+                    self._cert_signing_task.cancel()
+                self._cert_signing_task = asyncio.create_task(
+                    self._send_sign_certificate_with_retry(csr_pem)
+                )
         except Exception as e:
             logger.error(f"Failed to send triggered message {requested}: {e}")
 
@@ -1278,6 +1327,10 @@ class ChargingStationController:
             current_url = (getattr(self.ocpp_client, "server_url", "") or "").rstrip("/")
             self._cert_valid_for_url = current_url
             save_cert_metadata({"valid_for_url": current_url})
+
+        # TC_A_23_CS: SignCertificate 재시도 루프가 대기 중이면 신호
+        if self._cert_signed_event is not None and not self._cert_signed_event.is_set():
+            self._cert_signed_event.set()
 
         # Send SecurityEventNotification after cert install/renewal
         security_profile = self._get_int("SecurityCtrlr", "SecurityProfile", 0)

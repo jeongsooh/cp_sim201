@@ -294,6 +294,37 @@ class ChargingStationController:
                 logger.info("BasicAuthPassword updated — scheduling reconnect with new credentials")
                 asyncio.create_task(self._reconnect_after_password_change())
 
+    async def _generate_csr_pem(self) -> str:
+        """Generate a 2048-bit RSA CSR; save the private key for later CertificateSigned use."""
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        )
+        os.makedirs(self._cert_dir, exist_ok=True)
+        key_path = os.path.join(self._cert_dir, "client.key")
+        with open(key_path, "wb") as f:
+            f.write(key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            ))
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, self.ocpp_client.station_id),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME,
+                                   self._get_param("SecurityCtrlr", "OrganizationName", "TEST_CORP")),
+            ]))
+            .sign(key, hashes.SHA256())
+        )
+        logger.info(f"CSR generated, private key saved to {key_path}")
+        return csr.public_bytes(serialization.Encoding.PEM).decode()
+
     async def _reconnect_after_password_change(self) -> None:
         """Close the current connection so the reconnect loop picks up the new BasicAuth header."""
         await asyncio.sleep(0.5)  # Let SetVariables response be sent first
@@ -718,7 +749,7 @@ class ChargingStationController:
         supported = {
             "BootNotification", "Heartbeat", "StatusNotification",
             "MeterValues", "FirmwareStatusNotification", "LogStatusNotification",
-            "TransactionEvent",
+            "TransactionEvent", "SignChargingStationCertificate",
         }
         if requested not in supported:
             return {"status": "NotImplemented"}
@@ -765,6 +796,13 @@ class ChargingStationController:
                         "seqNo": self._tx_seq_no,
                         "transactionInfo": {"transactionId": self.transaction_id},
                     })
+
+            elif requested == "SignChargingStationCertificate":
+                csr_pem = await self._generate_csr_pem()
+                await self.ocpp_client.call("SignCertificate", {
+                    "csr": csr_pem,
+                    "certificateType": "ChargingStationCertificate",
+                })
         except Exception as e:
             logger.error(f"Failed to send triggered message {requested}: {e}")
 

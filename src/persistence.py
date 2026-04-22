@@ -14,6 +14,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 _DEVICE_MODEL_FILE = os.path.join(_DATA_DIR, "device_model.json")
 _NETWORK_PROFILES_FILE = os.path.join(_DATA_DIR, "network_profiles.json")
+_CERT_METADATA_FILE = os.path.join(_DATA_DIR, "cert_metadata.json")
 
 
 def _ensure_data_dir() -> None:
@@ -86,3 +87,26 @@ def save_network_profile(slot: int, profile: Dict) -> None:
         logger.info(f"Network profile slot {slot} saved to {_NETWORK_PROFILES_FILE}")
     except Exception as e:
         logger.warning(f"Failed to save network profile: {e}")
+
+
+def load_cert_metadata() -> Dict:
+    """CertificateSigned 수신 시점의 메타데이터(어느 CSMS URL에 유효한지 등)를 로드."""
+    _ensure_data_dir()
+    if not os.path.exists(_CERT_METADATA_FILE):
+        return {}
+    try:
+        with open(_CERT_METADATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load cert metadata: {e}")
+        return {}
+
+
+def save_cert_metadata(metadata: Dict) -> None:
+    _ensure_data_dir()
+    try:
+        with open(_CERT_METADATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+        logger.info(f"Cert metadata saved to {_CERT_METADATA_FILE}")
+    except Exception as e:
+        logger.warning(f"Failed to save cert metadata: {e}")

@@ -13,6 +13,8 @@ from .persistence import (
     save_device_model,
     load_network_profiles,
     save_network_profile,
+    load_cert_metadata,
+    save_cert_metadata,
 )
 from .station_config import StationConfig
 
@@ -68,6 +70,9 @@ class ChargingStationController:
         self._cert_dir: str = cert_dir
         self._basic_auth_user: str = basic_auth_user
         self._ca_cert: str = ca_cert
+        # ChargingStationCertificate가 서명된 시점의 CSMS URL을 기억한다.
+        # TC_A_21_CS: Profile 3 전환 시 target slot의 URL이 이 값과 다르면 Rejected.
+        self._cert_valid_for_url: Optional[str] = load_cert_metadata().get("valid_for_url")
         # key: serialNumber hex string
         # value: {"certificateType": str, "certificateHashData": dict, "pem_path": str}
         self.installed_certificates: Dict[str, Dict] = {}
@@ -280,6 +285,24 @@ class ChargingStationController:
         if component == "SecurityCtrlr" and variable == "BasicAuthPassword":
             if not (16 <= len(value) <= 40):
                 return "Rejected"
+
+        if component == "OCPPCommCtrlr" and variable == "NetworkConfigurationPriority":
+            # TC_A_21_CS: 활성 slot이 Profile 3를 요구하는데 현재 client cert가
+            # 해당 CSMS URL에 대해 서명된 것이 아니면 Rejected.
+            slots = [s.strip() for s in value.split(",") if s.strip()]
+            if slots:
+                profiles = load_network_profiles()
+                active = profiles.get(slots[0])
+                if active and int(active.get("securityProfile", 0)) == 3:
+                    target_url = (active.get("ocppCsmsUrl") or "").rstrip("/")
+                    saved_url = (self._cert_valid_for_url or "").rstrip("/")
+                    if not saved_url or saved_url != target_url:
+                        logger.warning(
+                            f"NetworkConfigurationPriority rejected: active slot requires "
+                            f"Profile 3 at {target_url!r}, but no valid ChargingStationCertificate "
+                            f"(cert valid for {saved_url!r})"
+                        )
+                        return "Rejected"
         return None
 
     def _apply_variable_change(self, component: str, variable: str, value: str) -> None:
@@ -1249,6 +1272,12 @@ class ChargingStationController:
         except OSError as e:
             logger.error(f"CertificateSigned: failed to write file: {e}")
             return {"status": "Rejected"}
+
+        # Track which CSMS URL this cert is valid for (TC_A_21_CS downgrade-prevention)
+        if cert_type == "ChargingStationCertificate":
+            current_url = (getattr(self.ocpp_client, "server_url", "") or "").rstrip("/")
+            self._cert_valid_for_url = current_url
+            save_cert_metadata({"valid_for_url": current_url})
 
         # Send SecurityEventNotification after cert install/renewal
         security_profile = self._get_int("SecurityCtrlr", "SecurityProfile", 0)

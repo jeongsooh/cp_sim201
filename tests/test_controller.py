@@ -30,29 +30,39 @@ async def test_boot_routine(controller, mock_client):
 @pytest.mark.asyncio
 async def test_transaction_flow(controller, mock_client):
     # 1. User plugs in cable
+    # TxStartPoint includes "EVConnected" — OCPP 2.0.1 §E02 OR semantics means
+    # the transaction is started on cable plug, before any authorization.
     with patch.object(HardwareAPI, 'check_proximity', return_value=True):
         await controller.simulate_cable_plugged()
-        
+
     assert controller.connector_hal.status == "Occupied"
     assert controller.is_authorized is False
-    assert controller.transaction_id is None
-    
+    assert controller.transaction_id is not None
+    tx_id = controller.transaction_id
+
+    # StatusNotification + TransactionEvent(Started, triggerReason=EVConnected)
+    args_list = mock_client.call.call_args_list
+    assert args_list[0][0][0] == "StatusNotification"
+    assert args_list[1][0][0] == "TransactionEvent"
+    assert args_list[1][0][1]["eventType"] == "Started"
+    assert args_list[1][0][1]["triggerReason"] == "EVConnected"
+
     # Reset mock to clarify counts
     mock_client.call.reset_mock()
-    
-    # 2. User Scans RFID
+
+    # 2. User Scans RFID — authorize existing tx, energize relay, send Updated
     with patch.object(HardwareAPI, 'relay_on') as mock_relay_close:
         await controller.handle_rfid_scan("TEST_UID")
-        
-    # Should call Authorize, then since plugged in, call TransactionEvent(Started)
+
     assert mock_client.call.call_count == 2
     args_list = mock_client.call.call_args_list
     assert args_list[0][0][0] == "Authorize"
     assert args_list[1][0][0] == "TransactionEvent"
-    assert args_list[1][0][1]["eventType"] == "Started"
-    
+    assert args_list[1][0][1]["eventType"] == "Updated"
+    assert args_list[1][0][1]["triggerReason"] == "Authorized"
+
     assert controller.is_authorized is True
-    assert controller.transaction_id is not None
+    assert controller.transaction_id == tx_id
     mock_relay_close.assert_called_once_with(1)
     
     # Reset mock

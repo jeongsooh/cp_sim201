@@ -284,7 +284,15 @@ class ChargingStationController:
                 self.ocpp_client._ws_kwargs["additional_headers"] = {
                     "Authorization": f"Basic {credentials}"
                 }
-                logger.info("BasicAuthPassword updated — new credentials will apply on next connection")
+                logger.info("BasicAuthPassword updated — scheduling reconnect with new credentials")
+                asyncio.create_task(self._reconnect_after_password_change())
+
+    async def _reconnect_after_password_change(self) -> None:
+        """Close the current connection so the reconnect loop picks up the new BasicAuth header."""
+        await asyncio.sleep(0.5)  # Let SetVariables response be sent first
+        logger.info("Closing connection to reconnect with updated BasicAuth password")
+        if self.ocpp_client.ws:
+            await self.ocpp_client.ws.close()
 
     # ------------------------------------------------------------------
     # 부트 / 하트비트

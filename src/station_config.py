@@ -28,8 +28,14 @@ class _NoWildcardSSLObject:
             for san_type, san_value in cert.get('subjectAltName', []):
                 if san_type == 'DNS' and '*' in san_value:
                     raise ssl.SSLCertVerificationError(
-                        f"CERTIFICATE_VERIFY_FAILED: wildcard certificate not allowed: {san_value}"
+                        f"CERTIFICATE_VERIFY_FAILED: wildcard certificate not allowed (SAN): {san_value}"
                     )
+            for rdns in cert.get('subject', ()):
+                for name_type, name_value in rdns:
+                    if name_type == 'commonName' and '*' in name_value:
+                        raise ssl.SSLCertVerificationError(
+                            f"CERTIFICATE_VERIFY_FAILED: wildcard certificate not allowed (CN): {name_value}"
+                        )
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, '_obj'), name)

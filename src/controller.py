@@ -267,6 +267,13 @@ class ChargingStationController:
             })
         return result
 
+    def _validate_variable_value(self, component: str, variable: str, value: str) -> Optional[str]:
+        """Returns a rejection attributeStatus string if value is invalid, else None."""
+        if component == "SecurityCtrlr" and variable == "BasicAuthPassword":
+            if not (16 <= len(value) <= 40):
+                return "Rejected"
+        return None
+
     def _apply_variable_change(self, component: str, variable: str, value: str) -> None:
         """SetVariables 수신 후 즉시 동작에 반영이 필요한 파라미터를 처리한다."""
         if component == "HeartbeatCtrlr" and variable == "HeartbeatInterval":
@@ -418,9 +425,13 @@ class ChargingStationController:
                 if mutability == "ReadOnly":
                     status = "ReadOnly"
                 else:
-                    self.device_model[comp][var] = (val, mutability)
-                    self._apply_variable_change(comp, var, val)
-                    status = "Accepted"
+                    rejection = self._validate_variable_value(comp, var, val)
+                    if rejection:
+                        status = rejection
+                    else:
+                        self.device_model[comp][var] = (val, mutability)
+                        self._apply_variable_change(comp, var, val)
+                        status = "Accepted"
             else:
                 status = "UnknownVariable"
             results.append({

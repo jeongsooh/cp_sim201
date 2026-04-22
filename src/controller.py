@@ -352,8 +352,11 @@ class ChargingStationController:
             except Exception as e:
                 logger.error(f"SignCertificate call failed on attempt {attempt}: {e}")
 
+            # OCPP 2.0.1 §A04: N번째 시도의 타임아웃은 N × CertSigningWaitMinimum
+            # (attempt 1: wait, attempt 2: 2×wait, ...)
+            current_wait = wait_seconds * attempt
             try:
-                await asyncio.wait_for(self._cert_signed_event.wait(), timeout=wait_seconds)
+                await asyncio.wait_for(self._cert_signed_event.wait(), timeout=current_wait)
                 logger.info(
                     f"CertificateSigned received on attempt {attempt}/{total_attempts}"
                 )
@@ -362,7 +365,7 @@ class ChargingStationController:
             except asyncio.TimeoutError:
                 if attempt < total_attempts:
                     logger.warning(
-                        f"CertificateSigned timeout after {wait_seconds}s "
+                        f"CertificateSigned timeout after {current_wait}s "
                         f"(attempt {attempt}/{total_attempts}) — retrying SignCertificate"
                     )
                 else:

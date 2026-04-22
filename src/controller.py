@@ -41,6 +41,9 @@ class ChargingStationController:
         self._pending_reset: bool = False
         self._pending_reset_type: str = "Immediate"
         self._first_connect: bool = True
+        # BootNotification 응답 상태 ("Accepted" | "Pending" | "Rejected" | "Unknown")
+        # TC_B_02_CS: Pending 상태에서 트랜잭션·원격시작 요청을 거부해야 함.
+        self._boot_status: str = "Unknown"
 
         # Block G: EVSE 가용 상태
         self.is_evse_available: bool = True
@@ -429,7 +432,9 @@ class ChargingStationController:
             }
         }
         res = await self.ocpp_client.call("BootNotification", payload)
-        if res and res.get("status") == "Accepted":
+        status = (res or {}).get("status", "Unknown")
+        self._boot_status = status
+        if status == "Accepted":
             logger.info("BootNotification Accepted.")
             await self.connector_hal.on_status_change(force=True)
 
@@ -439,7 +444,7 @@ class ChargingStationController:
             if not self._heartbeat_task or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         else:
-            logger.warning("BootNotification Not Accepted.")
+            logger.warning(f"BootNotification Not Accepted (status={status}).")
 
     async def _on_reconnect(self) -> None:
         """연결 성립 시 호출. 최초 부팅 또는 Reset 후에만 BootNotification 전송."""
@@ -765,6 +770,12 @@ class ChargingStationController:
 
     async def handle_request_start_transaction(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """TC_F_*: Remote start transaction from CSMS"""
+        # TC_B_02_CS: BootNotification 이 Accepted 되기 전에는 트랜잭션 시작 거부.
+        if self._boot_status != "Accepted":
+            logger.warning(
+                f"RequestStartTransaction rejected: boot status is {self._boot_status!r}"
+            )
+            return {"status": "Rejected"}
         if not self.is_evse_available:
             logger.warning("RequestStartTransaction rejected: EVSE not available")
             return {"status": "Rejected"}

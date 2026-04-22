@@ -420,6 +420,7 @@ async def test_TC_E_transaction_event_allow_offline(controller, mock_client):
 @pytest.mark.asyncio
 async def test_TC_F_01_CS_request_start_transaction(controller, mock_client):
     """TC_F_01_CS: RequestStartTransaction — triggers local start when EVSE available"""
+    controller._boot_status = "Accepted"
     controller.connector_hal.status = "Occupied"
     with patch.object(HardwareAPI, "relay_on"):
         res = await controller.handle_request_start_transaction({

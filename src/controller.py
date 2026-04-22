@@ -537,6 +537,7 @@ class ChargingStationController:
             self.is_evse_available = True
             self.device_model["EVSE"]["AvailabilityState"] = ("Available", "ReadWrite")
         save_device_model(self.device_model)
+        asyncio.create_task(self.connector_hal.on_status_change(force=True))
         return {"status": "Accepted"}
 
     # ------------------------------------------------------------------

@@ -65,15 +65,18 @@ async def rfid_monitor(controller: ChargingStationController) -> None:
 
     while True:
         await asyncio.sleep(0.5) # Poll interval
-        if ser:
-            uid = await asyncio.to_thread(blocking_read_rfid, ser)
-            if uid:
-                logger.info(f"=====================================")
-                logger.info(f"   RFID TAG SCANNED: [{uid}]")
-                logger.info(f"=====================================")
-                # Handles AuthorizeRequest internally and triggers 
-                # a transaction if accepted by CSMS and connector is plugged.
-                await controller.handle_rfid_scan(uid)
+        try:
+            if ser:
+                uid = await asyncio.to_thread(blocking_read_rfid, ser)
+                if uid:
+                    logger.info(f"=====================================")
+                    logger.info(f"   RFID TAG SCANNED: [{uid}]")
+                    logger.info(f"=====================================")
+                    # Handles AuthorizeRequest internally and triggers
+                    # a transaction if accepted by CSMS and connector is plugged.
+                    await controller.handle_rfid_scan(uid)
+        except Exception as e:
+            logger.error(f"RFID monitor iteration failed: {e}", exc_info=True)
 
 async def proximity_monitor(controller: ChargingStationController) -> None:
     """
@@ -86,23 +89,26 @@ async def proximity_monitor(controller: ChargingStationController) -> None:
     REQUIRED_COUNTS = 5  # Needs 5 consecutive matches (5 * 0.2s = 1.0s)
     
     while True:
-        # read_physical_connection calls sysfs directly
-        current_status = controller.connector_hal.read_physical_connection()
-        
-        if current_status == pending_status:
-            consecutive_counts += 1
-        else:
-            pending_status = current_status
-            consecutive_counts = 1
-            
-        if consecutive_counts >= REQUIRED_COUNTS and pending_status != stable_status:
-            logger.info(f"Physical Connection STABLE: changed from {stable_status} to {pending_status}")
-            stable_status = pending_status
-            if stable_status == "Occupied":
-                await controller.simulate_cable_plugged()
+        try:
+            # read_physical_connection calls sysfs directly
+            current_status = controller.connector_hal.read_physical_connection()
+
+            if current_status == pending_status:
+                consecutive_counts += 1
             else:
-                await controller.simulate_cable_unplugged()
-        
+                pending_status = current_status
+                consecutive_counts = 1
+
+            if consecutive_counts >= REQUIRED_COUNTS and pending_status != stable_status:
+                logger.info(f"Physical Connection STABLE: changed from {stable_status} to {pending_status}")
+                stable_status = pending_status
+                if stable_status == "Occupied":
+                    await controller.simulate_cable_plugged()
+                else:
+                    await controller.simulate_cable_unplugged()
+        except Exception as e:
+            logger.error(f"Proximity monitor iteration failed: {e}", exc_info=True)
+
         # Poll rapidly for debounce
         await asyncio.sleep(0.2)
 
@@ -115,12 +121,15 @@ async def cp_adc_monitor(controller: ChargingStationController) -> None:
     state_c_threshold = 40000
     
     while True:
-        adc_val = controller.power_contactor_hal.read_cp_voltage()
-        # If ADC is valid and drops below 40k, EV is pulling power (State C)
-        if 0 < adc_val < state_c_threshold:
-            if controller.transaction_id and not getattr(controller, "_state_c_active", False):
-                await controller.handle_state_c()
-                
+        try:
+            adc_val = controller.power_contactor_hal.read_cp_voltage()
+            # If ADC is valid and drops below 40k, EV is pulling power (State C)
+            if 0 < adc_val < state_c_threshold:
+                if controller.transaction_id and not getattr(controller, "_state_c_active", False):
+                    await controller.handle_state_c()
+        except Exception as e:
+            logger.error(f"CP ADC monitor iteration failed: {e}", exc_info=True)
+
         await asyncio.sleep(0.5)
 
 async def main() -> None:

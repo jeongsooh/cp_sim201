@@ -1168,21 +1168,28 @@ class ChargingStationController:
 
     async def handle_state_c(self) -> None:
         """Called by main.py ADC monitor when CP voltage drops to +6V (< 40000 ADC)"""
-        if self.transaction_id and not self._state_c_active:
-            self._state_c_active = True
-            logger.info("Control Pilot dropped to State C (+6V). EV is Charging!")
-            self._tx_seq_no += 1
-            payload = {
-                "eventType": "Updated",
-                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "triggerReason": "ChargingStateChanged",
-                "seqNo": self._tx_seq_no,
-                "transactionInfo": {
-                    "transactionId": self.transaction_id,
-                    "chargingState": "Charging"
-                }
+        if not (self.transaction_id and not self._state_c_active):
+            return
+        # Snapshot the txId so a concurrent stop_transaction clearing it mid-flight
+        # doesn't leave us sending an event with an invalid id.
+        tx_id = self.transaction_id
+        self._state_c_active = True
+        logger.info("Control Pilot dropped to State C (+6V). EV is Charging!")
+        self._tx_seq_no += 1
+        payload = {
+            "eventType": "Updated",
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "triggerReason": "ChargingStateChanged",
+            "seqNo": self._tx_seq_no,
+            "transactionInfo": {
+                "transactionId": tx_id,
+                "chargingState": "Charging"
             }
+        }
+        try:
             await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
+        except Exception as e:
+            logger.error(f"handle_state_c: TransactionEvent call failed: {e}")
 
     async def stop_transaction(self, stopped_reason: str = "Local") -> None:
         if self.transaction_id:

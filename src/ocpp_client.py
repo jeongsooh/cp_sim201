@@ -104,7 +104,8 @@ class OCPPClient:
                 asyncio.create_task(self._drain_offline_queue())
                 self._listen_task = asyncio.create_task(self._listen())
                 await self._listen_task
-            except (ConnectionClosed, ConnectionRefusedError, OSError) as e:
+            except (ConnectionClosed, ConnectionRefusedError, OSError,
+                    websockets.exceptions.InvalidStatus) as e:
                 e_str = str(e)
                 is_cert_error = (
                     isinstance(e, ssl.SSLCertVerificationError)

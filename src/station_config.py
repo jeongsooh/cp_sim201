@@ -7,6 +7,49 @@ from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
+
+class _NoWildcardSSLObject:
+    """Wraps ssl.SSLObject to reject wildcard server certificates at handshake time.
+
+    asyncio calls wrap_bio() → do_handshake() on the returned object.
+    We raise after the real handshake completes but before the WebSocket upgrade,
+    so OCTT never records "Successfully connected".
+    """
+    __slots__ = ('_obj',)
+
+    def __init__(self, obj: ssl.SSLObject) -> None:
+        object.__setattr__(self, '_obj', obj)
+
+    def do_handshake(self) -> None:
+        obj = object.__getattribute__(self, '_obj')
+        obj.do_handshake()
+        cert = obj.getpeercert()
+        if cert:
+            for san_type, san_value in cert.get('subjectAltName', []):
+                if san_type == 'DNS' and '*' in san_value:
+                    raise ssl.SSLCertVerificationError(
+                        f"CERTIFICATE_VERIFY_FAILED: wildcard certificate not allowed: {san_value}"
+                    )
+
+    def __getattr__(self, name: str):
+        return getattr(object.__getattribute__(self, '_obj'), name)
+
+    def __setattr__(self, name: str, value) -> None:
+        setattr(object.__getattribute__(self, '_obj'), name, value)
+
+
+class _NoWildcardSSLContext(ssl.SSLContext):
+    """SSL context whose wrap_bio() returns a wildcard-rejecting SSLObject."""
+
+    def wrap_bio(self, incoming, outgoing, server_side=False, server_hostname=None, session=None):
+        obj = super().wrap_bio(
+            incoming, outgoing,
+            server_side=server_side,
+            server_hostname=server_hostname,
+            session=session,
+        )
+        return _NoWildcardSSLObject(obj)
+
 _DEFAULT_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "station_config.json",
@@ -87,7 +130,7 @@ class StationConfig:
         return kwargs
 
     def _build_ssl_context(self) -> ssl.SSLContext:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx = _NoWildcardSSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
         if self.ca_cert:

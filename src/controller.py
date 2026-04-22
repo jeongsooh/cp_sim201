@@ -1308,6 +1308,16 @@ class ChargingStationController:
             )
             return {"status": "Rejected"}
 
+        # TC_A_22_CS: OCPP 2.0.1 §A10 — 보안 프로파일은 단방향 업그레이드만 허용.
+        # 현재 활성 프로파일보다 낮은 프로파일로의 SetNetworkProfile은 거부.
+        current_sp = int(self._get_param("SecurityCtrlr", "SecurityProfile", "0"))
+        if sp < current_sp:
+            logger.warning(
+                f"SetNetworkProfile rejected: downgrade from current profile "
+                f"{current_sp} to {sp} is not allowed"
+            )
+            return {"status": "Rejected"}
+
         save_network_profile(slot, conn_data)
         logger.info(
             f"SetNetworkProfile: slot={slot} securityProfile={sp} ocppVersion={ocpp_version} url={url}"

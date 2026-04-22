@@ -44,6 +44,8 @@ class ChargingStationController:
         # BootNotification 응답 상태 ("Accepted" | "Pending" | "Rejected" | "Unknown")
         # TC_B_02_CS: Pending 상태에서 트랜잭션·원격시작 요청을 거부해야 함.
         self._boot_status: str = "Unknown"
+        # TC_B_03_CS: Rejected/Pending 응답 시 interval 후 재시도 태스크
+        self._boot_retry_task: Optional[asyncio.Task] = None
 
         # Block G: EVSE 가용 상태
         self.is_evse_available: bool = True
@@ -436,6 +438,9 @@ class ChargingStationController:
         self._boot_status = status
         if status == "Accepted":
             logger.info("BootNotification Accepted.")
+            # TC_B_03_CS: Accepted 받으면 예약된 재시도 취소
+            if self._boot_retry_task and not self._boot_retry_task.done():
+                self._boot_retry_task.cancel()
             await self.connector_hal.on_status_change(force=True)
 
             interval = res.get("interval", 300)
@@ -445,6 +450,24 @@ class ChargingStationController:
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         else:
             logger.warning(f"BootNotification Not Accepted (status={status}).")
+            # TC_B_03_CS / §B03: Rejected → interval 초 후 재전송.
+            # Pending도 동일한 정책 (§B11, 단 TriggerMessage가 먼저 오면 그쪽이 우선).
+            interval = int((res or {}).get("interval", 60)) or 60
+            if self._boot_retry_task and not self._boot_retry_task.done():
+                self._boot_retry_task.cancel()
+            self._boot_retry_task = asyncio.create_task(
+                self._retry_boot_after(interval, reason)
+            )
+
+    async def _retry_boot_after(self, interval: int, reason: str) -> None:
+        """interval 초 뒤 BootNotification 재전송. 도중에 Accepted 되면 취소된다."""
+        try:
+            logger.info(f"Scheduling BootNotification retry in {interval}s")
+            await asyncio.sleep(interval)
+            if self._boot_status != "Accepted":
+                await self.boot_routine(reason=reason)
+        except asyncio.CancelledError:
+            pass
 
     async def _on_reconnect(self) -> None:
         """연결 성립 시 호출. 최초 부팅 또는 Reset 후에만 BootNotification 전송."""

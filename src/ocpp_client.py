@@ -4,6 +4,7 @@ import logging
 import uuid
 import random
 import os
+import ssl
 import websockets
 from websockets.exceptions import ConnectionClosed
 from typing import Dict, Any, Optional, Callable, Awaitable
@@ -104,9 +105,19 @@ class OCPPClient:
                 self._listen_task = asyncio.create_task(self._listen())
                 await self._listen_task
             except (ConnectionClosed, ConnectionRefusedError, OSError) as e:
-                if "CERTIFICATE_VERIFY_FAILED" in str(e):
+                e_str = str(e)
+                is_cert_error = (
+                    isinstance(e, ssl.SSLCertVerificationError)
+                    or "CERTIFICATE_VERIFY_FAILED" in e_str
+                    or "certificate verify failed" in e_str.lower()
+                    or "UNKNOWN_CA" in e_str
+                )
+                if is_cert_error:
                     self.tls_cert_error_occurred = True
-                logger.warning(f"Connection error: {e}")
+                logger.warning(
+                    f"Connection error (cert_error={is_cert_error}, "
+                    f"type={type(e).__name__}): {e_str[:300]}"
+                )
                 self._cleanup_pending_calls()
                 if not self._is_running:
                     break

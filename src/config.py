@@ -16,8 +16,10 @@ class OCPPConfig:
     BASIC_AUTH_PW_LEN_MAX = 40
 
     # 3. 네트워크 재연결 (Retry Logic)
-    RETRY_BACKOFF_WAIT_MINIMUM = 5      # Seconds
-    RETRY_BACKOFF_RANDOM_RANGE = 10     # Seconds
+    # Low minimum + small jitter so the first retry hits OCTT's invalid-cert window
+    # (OCTT presents the bad cert for ~8-10s; 5s min + up to 10s jitter was too slow)
+    RETRY_BACKOFF_WAIT_MINIMUM = 2      # Seconds
+    RETRY_BACKOFF_RANDOM_RANGE = 3      # Seconds
     RETRY_BACKOFF_REPEAT_TIMES = 10     # Max Doubling steps
 
     # 4. 트랜잭션 설정

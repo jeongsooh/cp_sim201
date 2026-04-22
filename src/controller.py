@@ -120,9 +120,9 @@ class ChargingStationController:
                 "ActiveNetworkProfile":             ("0",    "ReadOnly"),
                 "NetworkConfigurationPriority":     ("0",    "ReadWrite"),
                 "QueueAllMessages":                 ("false","ReadWrite"),
-                "RetryBackOffWaitMinimum":          ("10",   "ReadWrite"),
-                "RetryBackOffRepeatTimes":          ("5",    "ReadWrite"),
-                "RetryBackOffRandomRange":          ("10",   "ReadWrite"),
+                "RetryBackOffWaitMinimum":          ("2",    "ReadWrite"),
+                "RetryBackOffRepeatTimes":          ("10",   "ReadWrite"),
+                "RetryBackOffRandomRange":          ("3",    "ReadWrite"),
             },
             "LocalAuthListCtrlr": {
                 "Enabled": ("true", "ReadWrite"),
@@ -311,7 +311,10 @@ class ChargingStationController:
                 # 단순 연결 재연결(connection drop) — BootNotification 불필요, StatusNotification 전송
                 cert_error = self.ocpp_client.tls_cert_error_occurred
                 self.ocpp_client.tls_cert_error_occurred = False
-                logger.info("Reconnected after connection drop, sending StatusNotification.")
+                logger.info(
+                    f"Reconnected after connection drop "
+                    f"(cert_error={cert_error}), sending StatusNotification."
+                )
                 await self.connector_hal.on_status_change(force=True)
                 if cert_error:
                     await self._send_security_event_notification("InvalidCsmsCertificate")
@@ -330,7 +333,7 @@ class ChargingStationController:
             await self.ocpp_client.call("SecurityEventNotification", payload)
             logger.info(f"SecurityEventNotification sent: {event_type}")
         except Exception as e:
-            logger.error(f"Failed to send SecurityEventNotification: {e}")
+            logger.error(f"Failed to send SecurityEventNotification: {e}", exc_info=True)
 
     async def _heartbeat_loop(self) -> None:
         while True:

@@ -308,8 +308,26 @@ class ChargingStationController:
             await self.boot_routine(reason="PowerUp")
         else:
             # 단순 연결 재연결(connection drop) — BootNotification 불필요, StatusNotification 전송
+            cert_error = self.ocpp_client.tls_cert_error_occurred
+            self.ocpp_client.tls_cert_error_occurred = False
             logger.info("Reconnected after connection drop, sending StatusNotification.")
             await self.connector_hal.on_status_change(force=True)
+            if cert_error:
+                await self._send_security_event_notification("InvalidCSMSCertificate")
+
+    async def _send_security_event_notification(self, event_type: str, tech_info: str = "") -> None:
+        from datetime import datetime, timezone
+        payload: Dict[str, Any] = {
+            "type": event_type,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if tech_info:
+            payload["techInfo"] = tech_info
+        try:
+            await self.ocpp_client.call("SecurityEventNotification", payload)
+            logger.info(f"SecurityEventNotification sent: {event_type}")
+        except Exception as e:
+            logger.error(f"Failed to send SecurityEventNotification: {e}")
 
     async def _heartbeat_loop(self) -> None:
         while True:

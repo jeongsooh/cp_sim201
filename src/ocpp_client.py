@@ -41,6 +41,7 @@ class OCPPClient:
         self._on_connect_callback: Optional[Callable[[], Awaitable[None]]] = None
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
+        self.tls_cert_error_occurred = False
 
     def _load_schemas(self) -> Dict[str, dict]:
         schema_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schemas")
@@ -103,6 +104,8 @@ class OCPPClient:
                 self._listen_task = asyncio.create_task(self._listen())
                 await self._listen_task
             except (ConnectionClosed, ConnectionRefusedError, OSError) as e:
+                if "CERTIFICATE_VERIFY_FAILED" in str(e):
+                    self.tls_cert_error_occurred = True
                 logger.warning(f"Connection error: {e}")
                 self._cleanup_pending_calls()
                 if not self._is_running:

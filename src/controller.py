@@ -313,7 +313,7 @@ class ChargingStationController:
             logger.info("Reconnected after connection drop, sending StatusNotification.")
             await self.connector_hal.on_status_change(force=True)
             if cert_error:
-                await self._send_security_event_notification("InvalidCSMSCertificate")
+                await self._send_security_event_notification("InvalidCsmsCertificate")
 
     async def _send_security_event_notification(self, event_type: str, tech_info: str = "") -> None:
         from datetime import datetime, timezone

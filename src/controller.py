@@ -969,7 +969,8 @@ class ChargingStationController:
     async def _send_triggered_message(self, requested: str) -> None:
         try:
             if requested == "BootNotification":
-                await self.boot_routine()
+                # TC_B_02_CS / OCPP 2.0.1 §L: Triggered BootNotification must use reason="Triggered"
+                await self.boot_routine(reason="Triggered")
 
             elif requested == "Heartbeat":
                 await self.ocpp_client.call("Heartbeat", {})

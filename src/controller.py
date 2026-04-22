@@ -20,6 +20,28 @@ from .station_config import StationConfig
 
 logger = logging.getLogger(__name__)
 
+
+# OCPP 2.0.1 §B02.FR.03 — CSMS-initiated actions the CS must keep accepting
+# while BootNotification is still Pending. Anything outside this set gets
+# rejected with a CALLERROR SecurityError. In Rejected state nothing is
+# accepted (§B03).
+_PENDING_ALLOWED_ACTIONS = frozenset({
+    "GetBaseReport",
+    "GetVariables",
+    "SetVariables",
+    "TriggerMessage",
+    "CertificateSigned",
+    "InstallCertificate",
+    "DeleteCertificate",
+    "GetInstalledCertificateIds",
+    "UpdateFirmware",
+    "PublishFirmware",
+    "UnpublishFirmware",
+    "Reset",
+    "GetLog",
+})
+
+
 class ChargingStationController:
     def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = "", ca_cert: str = ""):
         self.ocpp_client = ocpp_client
@@ -248,6 +270,33 @@ class ChargingStationController:
         self.ocpp_client.register_action_handler("CertificateSigned",           self.handle_certificate_signed)
 
         self.ocpp_client.register_on_connect(self._on_reconnect)
+        # TC_B_30_CS: while BootNotification is Pending/Rejected, non-allowed
+        # CSMS-initiated actions must be answered with CALLERROR SecurityError.
+        self.ocpp_client.set_message_gate(self._boot_state_message_gate)
+
+    # ------------------------------------------------------------------
+    # Boot-state SecurityError gate (OCPP 2.0.1 §B02/B03)
+    # ------------------------------------------------------------------
+
+    def _boot_state_message_gate(self, action: str):
+        """Return (error_code, desc) to reject the incoming CSMS action, or None to allow.
+
+        §B02.FR.03: In Pending state, only a defined subset is accepted; every
+        other action must be rejected with SecurityError.
+        §B03.FR.04: In Rejected state, every CSMS-initiated action is rejected
+        with SecurityError until BootNotification is finally Accepted.
+        """
+        if self._boot_status == "Pending" and action not in _PENDING_ALLOWED_ACTIONS:
+            return (
+                "SecurityError",
+                f"Action '{action}' not allowed while BootNotification is Pending",
+            )
+        if self._boot_status == "Rejected":
+            return (
+                "SecurityError",
+                f"Action '{action}' not allowed while BootNotification is Rejected",
+            )
+        return None
 
     # ------------------------------------------------------------------
     # Device Model 헬퍼

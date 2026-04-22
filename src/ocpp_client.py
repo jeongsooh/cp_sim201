@@ -7,7 +7,7 @@ import os
 import ssl
 import websockets
 from websockets.exceptions import ConnectionClosed
-from typing import Dict, Any, Optional, Callable, Awaitable
+from typing import Dict, Any, Optional, Callable, Awaitable, Tuple
 from jsonschema import validate, ValidationError
 
 from .config import OCPPConfig, RPCErrorCodes
@@ -40,6 +40,11 @@ class OCPPClient:
 
         self._action_handlers: Dict[str, Callable[[Dict], Awaitable[Dict]]] = {}
         self._on_connect_callback: Optional[Callable[[], Awaitable[None]]] = None
+        # Pre-dispatch gate: given an incoming CSMS action name, returns None to
+        # allow, or (error_code, error_desc) to reject with a CALLERROR.
+        # Used for OCPP 2.0.1 §B02/B03 — SecurityError gating while in
+        # Pending/Rejected boot state.
+        self._message_gate: Optional[Callable[[str], Optional[Tuple[str, str]]]] = None
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -96,6 +101,11 @@ class OCPPClient:
 
     def register_on_connect(self, callback: Callable[[], Awaitable[None]]) -> None:
         self._on_connect_callback = callback
+
+    def set_message_gate(
+        self, gate: Optional[Callable[[str], Optional[Tuple[str, str]]]]
+    ) -> None:
+        self._message_gate = gate
 
     async def connect(self) -> None:
         self._is_running = True
@@ -218,6 +228,13 @@ class OCPPClient:
                 )
                 await self._send_error(msg_id, error_code, str(ve))
                 return
+
+            if self._message_gate is not None:
+                gate_result = self._message_gate(action)
+                if gate_result is not None:
+                    err_code, err_desc = gate_result
+                    await self._send_error(msg_id, err_code, err_desc)
+                    return
 
             if action in self._action_handlers:
                 try:

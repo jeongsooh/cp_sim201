@@ -62,6 +62,30 @@ _DEFAULT_CONFIG_PATH = os.path.join(
 )
 
 
+def _build_ssl_context(
+    security_profile: int,
+    ca_cert: str,
+    client_cert: str,
+    client_key: str,
+) -> ssl.SSLContext:
+    ctx = _NoWildcardSSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
+    if ca_cert:
+        ctx.load_verify_locations(ca_cert)
+    else:
+        ctx.load_default_certs()
+
+    if security_profile == 3:
+        if not (client_cert and client_key):
+            raise StationConfigError(
+                "security_profile 3 requires client_cert and client_key paths"
+            )
+        ctx.load_cert_chain(certfile=client_cert, keyfile=client_key)
+
+    return ctx
+
+
 class StationConfigError(Exception):
     pass
 
@@ -136,18 +160,49 @@ class StationConfig:
         return kwargs
 
     def _build_ssl_context(self) -> ssl.SSLContext:
-        ctx = _NoWildcardSSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        return _build_ssl_context(
+            security_profile=self.security_profile,
+            ca_cert=self.ca_cert,
+            client_cert=self.client_cert,
+            client_key=self.client_key,
+        )
 
-        if self.ca_cert:
-            ctx.load_verify_locations(self.ca_cert)
-        else:
-            ctx.load_default_certs()
+    @staticmethod
+    def build_ws_kwargs_from_profile(profile: Dict[str, Any], cert_dir: str, ca_cert: str) -> Dict[str, Any]:
+        """SetNetworkProfile로 수신한 connectionData에서 websockets.connect() kwargs를 생성한다.
 
-        if self.security_profile == 3:
-            ctx.load_cert_chain(certfile=self.client_cert, keyfile=self.client_key)
+        profile schema는 OCPP SetNetworkProfileRequest의 connectionData 일부:
+          - ocppCsmsUrl: str
+          - securityProfile: int
+          - basicAuth (optional): {"user": str, "password": str}
 
-        return ctx
+        CSR/CertificateSigned로 저장된 기본 client cert 경로는
+        cert_dir/client.crt, cert_dir/client.key를 사용한다 (Profile 3).
+        """
+        sp = int(profile.get("securityProfile", 0))
+        kwargs: Dict[str, Any] = {}
+
+        if sp in (2, 3):
+            client_cert = os.path.join(cert_dir, "client.crt") if sp == 3 else ""
+            client_key  = os.path.join(cert_dir, "client.key") if sp == 3 else ""
+            kwargs["ssl"] = _build_ssl_context(
+                security_profile=sp,
+                ca_cert=ca_cert,
+                client_cert=client_cert,
+                client_key=client_key,
+            )
+
+        if sp in (1, 2):
+            auth = profile.get("basicAuth") or {}
+            user = auth.get("user", "")
+            pw   = auth.get("password", "")
+            if user and pw:
+                credentials = base64.b64encode(f"{user}:{pw}".encode()).decode()
+                kwargs["additional_headers"] = {
+                    "Authorization": f"Basic {credentials}"
+                }
+
+        return kwargs
 
     def __repr__(self) -> str:
         return (

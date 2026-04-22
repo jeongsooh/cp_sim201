@@ -8,12 +8,18 @@ from typing import Dict, Any, Optional, List
 
 from .ocpp_client import OCPPClient
 from .hal import ConnectorHAL, TokenReaderHAL, PowerContactorHAL
-from .persistence import load_device_model, save_device_model
+from .persistence import (
+    load_device_model,
+    save_device_model,
+    load_network_profiles,
+    save_network_profile,
+)
+from .station_config import StationConfig
 
 logger = logging.getLogger(__name__)
 
 class ChargingStationController:
-    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = ""):
+    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = "", ca_cert: str = ""):
         self.ocpp_client = ocpp_client
         self.evse_id = 1
         self.connector_id = 1
@@ -31,6 +37,7 @@ class ChargingStationController:
         self._heartbeat_task = None
         self._meter_task = None
         self._pending_reset: bool = False
+        self._pending_reset_type: str = "Immediate"
         self._first_connect: bool = True
 
         # Block G: EVSE 가용 상태
@@ -60,6 +67,7 @@ class ChargingStationController:
         # Block A: 인증서 관리
         self._cert_dir: str = cert_dir
         self._basic_auth_user: str = basic_auth_user
+        self._ca_cert: str = ca_cert
         # key: serialNumber hex string
         # value: {"certificateType": str, "certificateHashData": dict, "pem_path": str}
         self.installed_certificates: Dict[str, Dict] = {}
@@ -338,11 +346,13 @@ class ChargingStationController:
 
     async def boot_routine(self, reason: str = "PowerUp") -> None:
         logger.info(f"Executing Boot Routine (reason={reason})")
+        firmware_version = self._get_param("ChargingStation", "FirmwareVersion", "1.0.0")
         payload = {
             "reason": reason,
             "chargingStation": {
                 "model": "AC_SIMULATOR_201",
-                "vendorName": "TEST_CORP"
+                "vendorName": "TEST_CORP",
+                "firmwareVersion": firmware_version,
             }
         }
         res = await self.ocpp_client.call("BootNotification", payload)
@@ -365,6 +375,9 @@ class ChargingStationController:
                 self._pending_reset = False
                 self._first_connect = False
                 await self.boot_routine(reason="RemoteReset")
+                # [OCPP 2.0.1 TC_A_19_CS / Part 2 §A08] 보안 프로파일 업그레이드 후
+                # priority에서 하위 보안 slot을 제거해 downgrade 차단
+                self._prune_network_priority_after_upgrade()
             elif self._first_connect:
                 self._first_connect = False
                 await self.boot_routine(reason="PowerUp")
@@ -411,11 +424,123 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_reset_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_B_08_CS: Handles incoming ResetRequest from CSMS"""
+        """TC_B_08_CS: Handles incoming ResetRequest from CSMS.
+
+        Accepted 응답을 먼저 반환하고, 백그라운드 태스크에서 활성 네트워크 프로파일을
+        적용한 뒤 WebSocket을 닫아 재연결 루프가 새 설정으로 접속하도록 한다.
+        재연결 직후 `_on_reconnect`가 `_pending_reset` 플래그를 소비해
+        `BootNotification(reason=RemoteReset)`을 전송한다.
+        """
         reset_type = payload.get("type", "Immediate")
         logger.info(f"Received ResetRequest: {reset_type}")
         self._pending_reset = True
+        self._pending_reset_type = reset_type
+        asyncio.create_task(self._execute_reset(reset_type))
         return {"status": "Accepted"}
+
+    async def _execute_reset(self, reset_type: str) -> None:
+        """Reset의 실제 동작: 활성 프로파일 적용 + WebSocket 종료로 재연결 유도."""
+        await asyncio.sleep(0.5)  # CallResult 전송이 끝나도록 유예
+        if reset_type == "OnIdle" and self.transaction_id:
+            logger.info(
+                f"Reset(OnIdle) deferred: active transaction {self.transaction_id}"
+            )
+            # 범위 밖: 트랜잭션 종료 후 재시도 — 현재 OCTT 테스트에서 미발생
+            return
+        try:
+            await self._apply_active_network_profile()
+        except Exception as e:
+            logger.error(f"Failed to apply active network profile on reset: {e}")
+        logger.info("Reset: closing WebSocket for reconnection")
+        if self.ocpp_client.ws:
+            try:
+                await self.ocpp_client.ws.close()
+            except Exception as e:
+                logger.warning(f"ws.close() raised: {e}")
+
+    def _prune_network_priority_after_upgrade(self) -> None:
+        """활성 slot의 보안 레벨보다 낮거나 알 수 없는 slot을 priority에서 제거한다.
+
+        OCPP 2.0.1 TC_A_19_CS 요구사항: Profile 3으로 업그레이드된 상태에서
+        NetworkConfigurationPriority에 Profile 2 이하 slot이 남아 있으면 안 된다.
+        network_profiles.json에 명시된 slot의 securityProfile만 신뢰하고,
+        unknown slot(예: 초기 station_config.json에서 부팅한 slot 0)은 제거한다.
+        """
+        priority_str = self._get_param("OCPPCommCtrlr", "NetworkConfigurationPriority", "")
+        if not priority_str:
+            return
+        slots = [s.strip() for s in priority_str.split(",") if s.strip()]
+        if not slots:
+            return
+
+        profiles = load_network_profiles()
+        active_slot = slots[0]
+        active_profile = profiles.get(active_slot)
+        if not active_profile:
+            return  # 활성 slot을 모르면 아무것도 하지 않음
+        active_sp = int(active_profile.get("securityProfile", 0))
+
+        kept = []
+        for slot in slots:
+            if slot == active_slot:
+                kept.append(slot)
+                continue
+            slot_profile = profiles.get(slot)
+            if slot_profile is None:
+                logger.info(f"Pruning unknown slot {slot} from priority (not in network_profiles.json)")
+                continue
+            slot_sp = int(slot_profile.get("securityProfile", 0))
+            if slot_sp < active_sp:
+                logger.info(
+                    f"Pruning slot {slot} from priority: securityProfile {slot_sp} < active {active_sp}"
+                )
+                continue
+            kept.append(slot)
+
+        new_priority = ",".join(kept)
+        if new_priority != priority_str:
+            self.device_model["OCPPCommCtrlr"]["NetworkConfigurationPriority"] = (new_priority, "ReadWrite")
+            save_device_model(self.device_model)
+            logger.info(f"NetworkConfigurationPriority pruned: '{priority_str}' → '{new_priority}'")
+
+    async def _apply_active_network_profile(self) -> None:
+        """NetworkConfigurationPriority의 첫 번째 슬롯을 활성 프로파일로 채택한다.
+
+        슬롯 데이터가 저장되어 있지 않으면 (slot 0이면서 파일 미존재 등) 현재 설정을 유지한다.
+        SecurityProfile / ActiveNetworkProfile device_model 값도 함께 갱신한다.
+        """
+        priority = self._get_param("OCPPCommCtrlr", "NetworkConfigurationPriority", "0")
+        try:
+            active_slot = int(priority.split(",")[0].strip())
+        except (ValueError, IndexError):
+            logger.warning(f"Invalid NetworkConfigurationPriority value: {priority}")
+            return
+
+        profiles = load_network_profiles()
+        profile = profiles.get(str(active_slot))
+        if not profile:
+            logger.info(
+                f"No stored network profile for slot {active_slot} — keeping current connection settings"
+            )
+            return
+
+        new_url = profile.get("ocppCsmsUrl", "")
+        if not new_url:
+            logger.warning(f"Slot {active_slot} profile missing ocppCsmsUrl — skipping")
+            return
+
+        ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
+            profile, self._cert_dir, self._ca_cert
+        )
+        self.ocpp_client.update_connection(new_url, ws_kwargs)
+
+        new_sp = str(int(profile.get("securityProfile", 0)))
+        self.device_model["SecurityCtrlr"]["SecurityProfile"] = (new_sp, "ReadWrite")
+        self.device_model["OCPPCommCtrlr"]["ActiveNetworkProfile"] = (str(active_slot), "ReadOnly")
+        save_device_model(self.device_model)
+        logger.info(
+            f"Active network profile switched: slot={active_slot} securityProfile={new_sp} url={new_url}"
+        )
 
     async def handle_get_variables(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """TC_B_06_CS: Returns device model variable values"""
@@ -1125,6 +1250,11 @@ class ChargingStationController:
             logger.error(f"CertificateSigned: failed to write file: {e}")
             return {"status": "Rejected"}
 
+        # Send SecurityEventNotification after cert install/renewal
+        security_profile = self._get_int("SecurityCtrlr", "SecurityProfile", 0)
+        event_type = "RenewChargingStationCertificate" if security_profile >= 2 else "CertificateInstalled"
+        asyncio.create_task(self._send_security_event_notification(event_type))
+
         return {"status": "Accepted"}
 
     # ------------------------------------------------------------------
@@ -1132,10 +1262,27 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_set_network_profile(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_B_13_CS: Sets a network connection profile slot"""
+        """TC_B_13_CS: Sets a network connection profile slot.
+
+        수신한 connectionData를 data/network_profiles.json에 저장한다.
+        활성화는 NetworkConfigurationPriority 변경 + Reset 시점에 수행한다.
+        """
         slot = payload["configurationSlot"]
-        ocpp_version = payload.get("connectionData", {}).get("ocppVersion", "unknown")
-        logger.info(f"SetNetworkProfile: slot={slot}, ocppVersion={ocpp_version}")
+        conn_data = payload.get("connectionData", {})
+        url = conn_data.get("ocppCsmsUrl", "")
+        sp  = int(conn_data.get("securityProfile", 0))
+        ocpp_version = conn_data.get("ocppVersion", "unknown")
+
+        if sp in (2, 3) and not url.startswith("wss://"):
+            logger.warning(
+                f"SetNetworkProfile rejected: profile {sp} requires wss:// URL, got {url}"
+            )
+            return {"status": "Rejected"}
+
+        save_network_profile(slot, conn_data)
+        logger.info(
+            f"SetNetworkProfile: slot={slot} securityProfile={sp} ocppVersion={ocpp_version} url={url}"
+        )
         return {"status": "Accepted"}
 
     # ------------------------------------------------------------------

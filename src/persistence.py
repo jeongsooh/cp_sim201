@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 _DEVICE_MODEL_FILE = os.path.join(_DATA_DIR, "device_model.json")
+_NETWORK_PROFILES_FILE = os.path.join(_DATA_DIR, "network_profiles.json")
 
 
 def _ensure_data_dir() -> None:
@@ -58,3 +59,30 @@ def save_device_model(model: Dict[str, Dict[str, Tuple[str, str]]]) -> None:
         logger.debug(f"Device model saved to {_DEVICE_MODEL_FILE}")
     except Exception as e:
         logger.warning(f"Failed to save device model: {e}")
+
+
+def load_network_profiles() -> Dict[str, Dict]:
+    """SetNetworkProfile로 저장된 슬롯별 프로파일을 반환한다. [OCPP 2.0.1 B10]"""
+    _ensure_data_dir()
+    if not os.path.exists(_NETWORK_PROFILES_FILE):
+        return {}
+    try:
+        with open(_NETWORK_PROFILES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("slots", {})
+    except Exception as e:
+        logger.warning(f"Failed to load network profiles: {e}")
+        return {}
+
+
+def save_network_profile(slot: int, profile: Dict) -> None:
+    """단일 슬롯의 connectionData를 upsert 한다."""
+    _ensure_data_dir()
+    slots = load_network_profiles()
+    slots[str(slot)] = profile
+    try:
+        with open(_NETWORK_PROFILES_FILE, "w", encoding="utf-8") as f:
+            json.dump({"slots": slots}, f, indent=2)
+        logger.info(f"Network profile slot {slot} saved to {_NETWORK_PROFILES_FILE}")
+    except Exception as e:
+        logger.warning(f"Failed to save network profile: {e}")

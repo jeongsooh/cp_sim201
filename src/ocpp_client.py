@@ -82,6 +82,18 @@ class OCPPClient:
     ) -> None:
         self._action_handlers[action] = handler
 
+    def update_connection(self, server_url: str, ws_kwargs: Dict[str, Any]) -> None:
+        """다음 재연결부터 적용될 서버 URL과 websockets.connect kwargs를 교체한다.
+
+        SetNetworkProfile + Reset으로 보안 프로파일이 바뀔 때 호출한다.
+        현재 연결을 닫지는 않으므로, 호출 후 별도로 self.ws.close()를 수행해야
+        재연결 루프가 새 설정으로 접속한다.
+        """
+        self.server_url = server_url if server_url.endswith("/") else server_url + "/"
+        self.uri = f"{self.server_url}{self.station_id}"
+        self._ws_kwargs = ws_kwargs
+        logger.info(f"Connection settings updated — next reconnect will use {self.uri}")
+
     def register_on_connect(self, callback: Callable[[], Awaitable[None]]) -> None:
         self._on_connect_callback = callback
 

@@ -299,21 +299,24 @@ class ChargingStationController:
 
     async def _on_reconnect(self) -> None:
         """연결 성립 시 호출. 최초 부팅 또는 Reset 후에만 BootNotification 전송."""
-        if self._pending_reset:
-            self._pending_reset = False
-            self._first_connect = False
-            await self.boot_routine(reason="RemoteReset")
-        elif self._first_connect:
-            self._first_connect = False
-            await self.boot_routine(reason="PowerUp")
-        else:
-            # 단순 연결 재연결(connection drop) — BootNotification 불필요, StatusNotification 전송
-            cert_error = self.ocpp_client.tls_cert_error_occurred
-            self.ocpp_client.tls_cert_error_occurred = False
-            logger.info("Reconnected after connection drop, sending StatusNotification.")
-            await self.connector_hal.on_status_change(force=True)
-            if cert_error:
-                await self._send_security_event_notification("InvalidCsmsCertificate")
+        try:
+            if self._pending_reset:
+                self._pending_reset = False
+                self._first_connect = False
+                await self.boot_routine(reason="RemoteReset")
+            elif self._first_connect:
+                self._first_connect = False
+                await self.boot_routine(reason="PowerUp")
+            else:
+                # 단순 연결 재연결(connection drop) — BootNotification 불필요, StatusNotification 전송
+                cert_error = self.ocpp_client.tls_cert_error_occurred
+                self.ocpp_client.tls_cert_error_occurred = False
+                logger.info("Reconnected after connection drop, sending StatusNotification.")
+                await self.connector_hal.on_status_change(force=True)
+                if cert_error:
+                    await self._send_security_event_notification("InvalidCsmsCertificate")
+        except Exception as e:
+            logger.warning(f"_on_reconnect: post-connect notification failed: {e}")
 
     async def _send_security_event_notification(self, event_type: str, tech_info: str = "") -> None:
         from datetime import datetime, timezone

@@ -1048,7 +1048,10 @@ class ChargingStationController:
 
     async def handle_rfid_scan(self, raw_uid: str) -> None:
         logger.info(f"RFID scanned: {raw_uid}")
-        id_token = {"idToken": raw_uid, "type": "ISO14443"}
+        # OCTT TC_C_02 etc. issue KeyCode-typed tokens — the hex UID from the
+        # RFID reader is a keycode string as far as OCPP is concerned. Keep
+        # type as "KeyCode" so the authorize payload matches OCTT expectations.
+        id_token = {"idToken": raw_uid, "type": "KeyCode"}
         try:
             res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
             status = (res or {}).get("idTokenInfo", {}).get("status")
@@ -1066,11 +1069,13 @@ class ChargingStationController:
                     # Already authorized and tx active — second scan = local stop
                     await self.stop_transaction("Local")
             else:
-                # TC_C_02_CS: Authorize rejected (Invalid/Unknown/Blocked).
-                # If a transaction was already started by EVConnected trigger, end it.
-                logger.warning(f"Authorize rejected: status={status}")
-                if self.transaction_id and not self.is_authorized:
-                    await self.stop_transaction("DeAuthorized")
+                # TC_C_02_CS: per OCPP 2.0.1 §C02, when Authorize is rejected
+                # the CS must NOT emit a TransactionEventRequest. Leave the
+                # transaction running; it will end naturally on cable unplug
+                # (EVDisconnected) or by some other trigger.
+                logger.warning(
+                    f"Authorize rejected: status={status} — leaving transaction as-is"
+                )
         except Exception as e:
             logger.error(f"Authorisation call failed: {e}")
 

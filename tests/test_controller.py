@@ -45,7 +45,7 @@ async def test_transaction_flow(controller, mock_client):
     assert args_list[0][0][0] == "StatusNotification"
     assert args_list[1][0][0] == "TransactionEvent"
     assert args_list[1][0][1]["eventType"] == "Started"
-    assert args_list[1][0][1]["triggerReason"] == "EVConnected"
+    assert args_list[1][0][1]["triggerReason"] == "CablePluggedIn"
 
     # Reset mock to clarify counts
     mock_client.call.reset_mock()

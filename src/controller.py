@@ -1144,10 +1144,12 @@ class ChargingStationController:
             "Energy.Active.Import.Register",
         )
         meter_data = self.power_contactor_hal.read_meter_values()
+        # [OCPP 2.0.1 Part 2] TriggerReasonEnumType uses "CablePluggedIn" for this event;
+        # chargingState uses "EVConnected".
         payload = {
             "eventType": "Started",
             "timestamp": now_iso,
-            "triggerReason": "EVConnected",
+            "triggerReason": "CablePluggedIn",
             "seqNo": self._tx_seq_no,
             "transactionInfo": {
                 "transactionId": self.transaction_id,
@@ -1298,10 +1300,13 @@ class ChargingStationController:
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             self._tx_seq_no += 1
 
+            # [OCPP 2.0.1 Part 2] stoppedReason uses ReasonEnumType (e.g. "DeAuthorized"),
+            # triggerReason uses TriggerReasonEnumType (e.g. "Deauthorized" — lowercase 'a').
             trigger_reason_map = {
                 "Local":           "StopAuthorized",
                 "Remote":          "RemoteStop",
                 "EVDisconnected":  "EVDeparted",
+                "DeAuthorized":    "Deauthorized",
             }
             trigger_reason = trigger_reason_map.get(stopped_reason, "StopAuthorized")
 

@@ -1027,6 +1027,7 @@ class ChargingStationController:
                         "timestamp": now,
                         "triggerReason": "Trigger",
                         "seqNo": self._tx_seq_no,
+                        "evse": {"id": self.evse_id, "connectorId": self.connector_id},
                         "transactionInfo": {"transactionId": self.transaction_id},
                     })
 
@@ -1084,6 +1085,7 @@ class ChargingStationController:
             "timestamp": now_iso,
             "triggerReason": trigger_reason,
             "seqNo": self._tx_seq_no,
+            "evse": {"id": self.evse_id, "connectorId": self.connector_id},
             "transactionInfo": {"transactionId": self.transaction_id},
         }
         if id_token is not None:
@@ -1151,6 +1153,7 @@ class ChargingStationController:
             "timestamp": now_iso,
             "triggerReason": "CablePluggedIn",
             "seqNo": self._tx_seq_no,
+            "evse": {"id": self.evse_id, "connectorId": self.connector_id},
             "transactionInfo": {
                 "transactionId": self.transaction_id,
                 "chargingState": "EVConnected",
@@ -1212,6 +1215,7 @@ class ChargingStationController:
                 "timestamp": now_iso,
                 "triggerReason": "MeterValuePeriodic",
                 "seqNo": self._tx_seq_no,
+                "evse": {"id": self.evse_id, "connectorId": self.connector_id},
                 "transactionInfo": {
                     "transactionId": self.transaction_id
                 },
@@ -1244,6 +1248,7 @@ class ChargingStationController:
                     "timestamp": now_iso,
                     "triggerReason": "Authorized",
                     "seqNo": self._tx_seq_no,
+                    "evse": {"id": self.evse_id, "connectorId": self.connector_id},
                     "transactionInfo": {
                         "transactionId": self.transaction_id
                     },
@@ -1279,6 +1284,7 @@ class ChargingStationController:
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "triggerReason": "ChargingStateChanged",
             "seqNo": self._tx_seq_no,
+            "evse": {"id": self.evse_id, "connectorId": self.connector_id},
             "transactionInfo": {
                 "transactionId": tx_id,
                 "chargingState": "Charging"
@@ -1318,6 +1324,7 @@ class ChargingStationController:
                 "timestamp": now_iso,
                 "triggerReason": trigger_reason,
                 "seqNo": self._tx_seq_no,
+                "evse": {"id": self.evse_id, "connectorId": self.connector_id},
                 "transactionInfo": {
                     "transactionId": self.transaction_id,
                     "stoppedReason": stopped_reason

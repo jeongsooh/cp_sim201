@@ -138,7 +138,7 @@ async def main() -> None:
     logger.info(f"Station config loaded: {cfg}")
 
     client = OCPPClient(cfg.station_id, cfg.csms_url, ws_kwargs=cfg.build_ws_kwargs())
-    controller = ChargingStationController(client, cert_dir=cfg.cert_dir, security_profile=cfg.security_profile)
+    controller = ChargingStationController(client, cert_dir=cfg.cert_dir, security_profile=cfg.security_profile, basic_auth_user=cfg.basic_auth_user)
 
     # 2. Connect to CSMS in the background (on_connect callback sends BootNotification)
     client_task = asyncio.create_task(client.connect())

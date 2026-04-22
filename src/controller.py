@@ -13,7 +13,7 @@ from .persistence import load_device_model, save_device_model
 logger = logging.getLogger(__name__)
 
 class ChargingStationController:
-    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0):
+    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = ""):
         self.ocpp_client = ocpp_client
         self.evse_id = 1
         self.connector_id = 1
@@ -59,6 +59,7 @@ class ChargingStationController:
 
         # Block A: 인증서 관리
         self._cert_dir: str = cert_dir
+        self._basic_auth_user: str = basic_auth_user
         # key: serialNumber hex string
         # value: {"certificateType": str, "certificateHashData": dict, "pem_path": str}
         self.installed_certificates: Dict[str, Dict] = {}
@@ -139,8 +140,11 @@ class ChargingStationController:
                 "AllowCSMSTLSWildcards":  ("false", "ReadWrite"),
                 "OrganizationName":       ("TEST_CORP", "ReadWrite"),
                 "CertificateEntries":     ("2",   "ReadOnly"),
+                "BasicAuthPassword":      ("",    "WriteOnly"),
             },
         })
+        # Force-override SecurityProfile after load_device_model so persisted "0" can't win
+        self.device_model["SecurityCtrlr"]["SecurityProfile"] = (str(security_profile), "ReadWrite")
 
         # Block B — Core / Provisioning
         self.ocpp_client.register_action_handler("Reset",         self.handle_reset_request)
@@ -270,6 +274,17 @@ class ChargingStationController:
                 self._heartbeat_task.cancel()
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
                 logger.info(f"HeartbeatInterval changed to {value}s — task restarted")
+
+        elif component == "SecurityCtrlr" and variable == "BasicAuthPassword":
+            if self._basic_auth_user and value:
+                import base64
+                credentials = base64.b64encode(
+                    f"{self._basic_auth_user}:{value}".encode()
+                ).decode()
+                self.ocpp_client._ws_kwargs["additional_headers"] = {
+                    "Authorization": f"Basic {credentials}"
+                }
+                logger.info("BasicAuthPassword updated — new credentials will apply on next connection")
 
     # ------------------------------------------------------------------
     # 부트 / 하트비트

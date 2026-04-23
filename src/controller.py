@@ -1393,42 +1393,50 @@ class ChargingStationController:
             f"RequestStartTransaction: token={id_token.get('idToken')} "
             f"remoteStartId={remote_start_id}"
         )
+        # TC_E_13_CS: the RequestStartTransactionResponse must reach the CSMS
+        # before any follow-up request (AuthorizeRequest or TransactionEvent).
+        # Defer the Authorize-and-start flow into a background task so this
+        # handler returns immediately. OCPP §4.1 would otherwise surface the
+        # AuthorizeRequest as an unexpected message while OCTT still waits
+        # for the RequestStart response.
+        asyncio.create_task(self._remote_start_flow(id_token, remote_start_id))
+        return {"status": "Accepted"}
 
+    async def _remote_start_flow(
+        self,
+        id_token: Dict[str, Any],
+        remote_start_id: Optional[int],
+    ) -> None:
         if self._get_bool("AuthCtrlr", "AuthorizeRemoteStart", True):
             try:
                 res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
                 if not (res and res.get("idTokenInfo", {}).get("status") == "Accepted"):
-                    logger.warning("RequestStartTransaction: Authorize rejected")
-                    return {"status": "Rejected"}
+                    logger.warning("Remote start Authorize not Accepted — aborting")
+                    return
             except Exception as e:
-                logger.error(f"Authorize failed during RequestStartTransaction: {e}")
-                return {"status": "Rejected"}
-
+                logger.error(f"Authorize failed during remote start: {e}")
+                return
         self.is_authorized = True
         self._tx_id_token_value = id_token.get("idToken")
         self._tx_group_id_token_value = None
-        # TC_E_13_CS §E01.FR.03: with TxStartPoint OR-semantics, authorization
-        # alone (remote) must start the tx immediately — Started(RemoteStart)
-        # carrying remoteStartId + idToken. If Authorized is not a configured
-        # start point, fall back to the AND-style waiter that needs cable plug.
+        # §E01.FR.03: TxStartPoint OR-semantics — if Authorized is listed the
+        # tx starts immediately with triggerReason=RemoteStart carrying
+        # remoteStartId + idToken; otherwise wait for cable plug.
         tx_start_points = [
             p.strip()
             for p in self._get_param("TxCtrlr", "TxStartPoint", "").split(",")
             if p.strip()
         ]
         if "Authorized" in tx_start_points:
-            asyncio.create_task(
-                self._start_tx_on_authorized(
-                    id_token,
-                    trigger_reason="RemoteStart",
-                    remote_start_id=remote_start_id,
-                )
+            await self._start_tx_on_authorized(
+                id_token,
+                trigger_reason="RemoteStart",
+                remote_start_id=remote_start_id,
             )
             if self.connector_hal.status == "Occupied":
                 self.power_contactor_hal.control_relay("Close")
         else:
-            asyncio.create_task(self._try_start_transaction())
-        return {"status": "Accepted"}
+            await self._try_start_transaction()
 
     async def handle_request_stop_transaction(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """TC_F_*: Remote stop transaction from CSMS"""

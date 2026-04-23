@@ -1897,10 +1897,12 @@ class ChargingStationController:
         except Exception as e:
             logger.warning(f"Failed to open relay on deauth suspend: {e}")
         self.is_authorized = False
-        # Omit idToken so OCTT's response to this Updated event doesn't
-        # cascade back into another rejection loop on the same token.
+        # TC_C_17_CS: emit a plain charging-state transition. OCTT treats a
+        # triggerReason=Deauthorized here as illegal (that trigger is reserved
+        # for the StopTxOnInvalidId=true path). Omit idToken so OCTT's
+        # response doesn't cascade back into another rejection loop.
         await self._send_tx_updated(
-            "Deauthorized",
+            "ChargingStateChanged",
             id_token=None,
             charging_state="SuspendedEVSE",
         )

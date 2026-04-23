@@ -45,6 +45,7 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("OCPPCommCtrlr", "RetryBackOffWaitMinimum"): "integer",
     ("OCPPCommCtrlr", "RetryBackOffRepeatTimes"): "integer",
     ("OCPPCommCtrlr", "RetryBackOffRandomRange"): "integer",
+    ("OCPPCommCtrlr", "MessageTimeout"): "integer",
     ("LocalAuthListCtrlr", "Enabled"): "boolean",
     ("LocalAuthListCtrlr", "Entries"): "integer",
     ("SmartChargingCtrlr", "Enabled"): "boolean",
@@ -225,6 +226,7 @@ class ChargingStationController:
                 "RetryBackOffWaitMinimum":          ("2",    "ReadWrite"),
                 "RetryBackOffRepeatTimes":          ("10",   "ReadWrite"),
                 "RetryBackOffRandomRange":          ("3",    "ReadWrite"),
+                "MessageTimeout":                   ("30",   "ReadOnly"),
             },
             "LocalAuthListCtrlr": {
                 "Enabled": ("true", "ReadWrite"),
@@ -853,7 +855,9 @@ class ChargingStationController:
             else:
                 _, mutability = self.device_model[comp][var]
                 if mutability == "ReadOnly":
-                    status = "ReadOnly"
+                    # TC_B_39_CS: SetVariableStatusEnumType has no "ReadOnly" value
+                    # — attempting to write a ReadOnly variable must return Rejected.
+                    status = "Rejected"
                 else:
                     rejection = self._validate_variable_value(comp, var, val)
                     if rejection:

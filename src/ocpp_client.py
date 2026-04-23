@@ -344,7 +344,7 @@ class OCPPClient:
         self,
         action: str,
         payload: Dict[str, Any],
-        timeout: float = 30.0,
+        timeout: float = 60.0,
         allow_offline: bool = False,
     ) -> Dict[str, Any]:
         """CSMS에 CALL 메세지를 전송하고 CALLRESULT를 반환한다.
@@ -377,6 +377,21 @@ class OCPPClient:
                 await self.ws.send(raw_msg)
                 return await asyncio.wait_for(future, timeout=timeout)
             except asyncio.TimeoutError:
+                # OCPP 2.0.1 §4.1: only one outstanding CALL is allowed per
+                # direction. If the local wait times out we cannot safely send
+                # the next CALL on this connection — the peer may still answer
+                # the old msgId and a new CALL would violate the rule (seen in
+                # TC_C_41_CS where OCTT blocked on user input for 30s). Close
+                # the socket so the existing reconnect loop resets state.
+                logger.warning(
+                    f"CALL timeout waiting for response to {action} (msgId={msg_id}) — "
+                    f"closing WS to keep §4.1 single-outstanding-CALL invariant"
+                )
+                try:
+                    if self.ws:
+                        await self.ws.close(code=1000, reason="call-timeout")
+                except Exception:
+                    pass
                 raise WaitQueueError(f"Timeout waiting for response to {action}")
             finally:
                 self._pending_calls.pop(msg_id, None)

@@ -21,6 +21,64 @@ from .station_config import StationConfig
 logger = logging.getLogger(__name__)
 
 
+# OCPP 2.0.1 DataEnumType per variable — used by SetVariables to reject
+# attributeValue whose format doesn't match the declared type (TC_B_11_CS).
+# Variables not listed default to "string" (accept any).
+_VAR_DATA_TYPES: Dict[tuple, str] = {
+    ("EVSE", "Power"): "integer",
+    ("TokenReader", "Enabled"): "boolean",
+    ("SampledDataCtrlr", "SampledDataTxUpdatedInterval"): "integer",
+    ("AlignedDataCtrlr", "AlignedDataInterval"): "integer",
+    ("HeartbeatCtrlr", "HeartbeatInterval"): "integer",
+    ("TxCtrlr", "StopTxOnEVSideDisconnect"): "boolean",
+    ("TxCtrlr", "EVConnectionTimeOut"): "integer",
+    ("AuthCtrlr", "AuthorizeRemoteStart"): "boolean",
+    ("AuthCtrlr", "LocalAuthorizeOffline"): "boolean",
+    ("AuthCtrlr", "LocalPreAuthorize"): "boolean",
+    ("AuthCtrlr", "OfflineTxForUnknownIdEnabled"): "boolean",
+    ("OCPPCommCtrlr", "MessageAttempts"): "integer",
+    ("OCPPCommCtrlr", "MessageAttemptInterval"): "integer",
+    ("OCPPCommCtrlr", "OfflineThreshold"): "integer",
+    ("OCPPCommCtrlr", "NetworkProfileConnectionAttempts"): "integer",
+    ("OCPPCommCtrlr", "ActiveNetworkProfile"): "integer",
+    ("OCPPCommCtrlr", "QueueAllMessages"): "boolean",
+    ("OCPPCommCtrlr", "RetryBackOffWaitMinimum"): "integer",
+    ("OCPPCommCtrlr", "RetryBackOffRepeatTimes"): "integer",
+    ("OCPPCommCtrlr", "RetryBackOffRandomRange"): "integer",
+    ("LocalAuthListCtrlr", "Enabled"): "boolean",
+    ("LocalAuthListCtrlr", "Entries"): "integer",
+    ("SmartChargingCtrlr", "Enabled"): "boolean",
+    ("ReservationCtrlr", "Enabled"): "boolean",
+    ("SecurityCtrlr", "SecurityProfile"): "integer",
+    ("SecurityCtrlr", "AllowCSMSTLSWildcards"): "boolean",
+    ("SecurityCtrlr", "CertificateEntries"): "integer",
+    ("SecurityCtrlr", "CertSigningWaitMinimum"): "integer",
+    ("SecurityCtrlr", "CertSigningRepeatTimes"): "integer",
+}
+
+
+def _value_matches_data_type(value: str, data_type: str) -> bool:
+    """Return True iff `value` is a valid textual encoding of `data_type`.
+
+    OCPP 2.0.1 carries every variable as a string; the receiving side is
+    responsible for checking that the string parses as the declared type.
+    """
+    import re
+    if data_type == "boolean":
+        return value.lower() in ("true", "false")
+    if data_type == "integer":
+        return bool(re.fullmatch(r"-?\d+", value))
+    if data_type == "decimal":
+        return bool(re.fullmatch(r"-?\d+(\.\d+)?", value))
+    if data_type == "dateTime":
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return True
+        except Exception:
+            return False
+    return True  # string / *List — any text permitted
+
+
 # OCPP 2.0.1 §B02.FR.03 — CSMS-initiated actions the CS must keep accepting
 # while BootNotification is still Pending. Anything outside this set gets
 # rejected with a CALLERROR SecurityError. In Rejected state nothing is
@@ -363,6 +421,15 @@ class ChargingStationController:
 
     def _validate_variable_value(self, component: str, variable: str, value: str) -> Optional[str]:
         """Returns a rejection attributeStatus string if value is invalid, else None."""
+        # TC_B_11_CS: reject values that don't parse as the variable's DataType.
+        data_type = _VAR_DATA_TYPES.get((component, variable))
+        if data_type and not _value_matches_data_type(value, data_type):
+            logger.warning(
+                f"SetVariables rejected: {component}.{variable}={value!r} "
+                f"is not a valid {data_type}"
+            )
+            return "Rejected"
+
         if component == "SecurityCtrlr" and variable == "BasicAuthPassword":
             if not (16 <= len(value) <= 40):
                 return "Rejected"

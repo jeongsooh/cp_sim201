@@ -216,6 +216,12 @@ class ChargingStationController:
         self._meter_task = None
         self._pending_reset: bool = False
         self._pending_reset_type: str = "Immediate"
+        # TC_B_20/TC_B_21_CS: only switch live ws_kwargs on Reset when a
+        # SetNetworkProfile has actually armed a profile switch since last boot.
+        # Without this, a plain Reset would re-apply whatever slot the
+        # persisted NetworkConfigurationPriority points at — potentially
+        # stripping credentials that match our current config.
+        self._pending_network_profile_switch: bool = False
         self._first_connect: bool = True
         # BootNotification 응답 상태 ("Accepted" | "Pending" | "Rejected" | "Unknown")
         # TC_B_02_CS: Pending 상태에서 트랜잭션·원격시작 요청을 거부해야 함.
@@ -880,26 +886,24 @@ class ChargingStationController:
     async def _apply_active_network_profile(self) -> None:
         """NetworkConfigurationPriority의 첫 번째 슬롯을 활성 프로파일로 채택한다.
 
-        이미 해당 슬롯으로 연결 중이면 (또는 슬롯 데이터가 없으면) 현재 설정을 그대로 유지한다.
-        저장된 프로파일이 BasicAuth 자격을 포함하지 않아 Authorization 헤더가 사라지는 것을 방지.
-        SecurityProfile / ActiveNetworkProfile device_model 값도 함께 갱신한다.
+        SetNetworkProfile이 _pending_network_profile_switch를 켜 놓지 않았다면
+        Reset이 들어와도 ws_kwargs를 바꾸지 않고 현재 설정을 그대로 사용한다.
+        (TC_B_20/TC_B_21_CS: 이전 테스트가 남긴 Priority/slot 데이터로 Reset 때마다
+        인증이 풀리는 문제를 막음.)
         """
+        if not self._pending_network_profile_switch:
+            logger.info(
+                "No SetNetworkProfile pending — keeping current connection settings"
+            )
+            return
+        # Consume the flag up front so a failed swap doesn't retry forever.
+        self._pending_network_profile_switch = False
+
         priority = self._get_param("OCPPCommCtrlr", "NetworkConfigurationPriority", "0")
         try:
             active_slot = int(priority.split(",")[0].strip())
         except (ValueError, IndexError):
             logger.warning(f"Invalid NetworkConfigurationPriority value: {priority}")
-            return
-
-        current_slot = self._get_param("OCPPCommCtrlr", "ActiveNetworkProfile", "0")
-        if current_slot.strip() == str(active_slot):
-            # TC_B_20_CS: a plain Reset (no preceding SetNetworkProfile) must
-            # keep the live ws_kwargs. Re-running build_ws_kwargs_from_profile
-            # on a slot whose stored data lacks basicAuth would drop the
-            # Authorization header and earn a 401 on reconnect.
-            logger.info(
-                f"Active slot unchanged ({active_slot}) — keeping current connection settings"
-            )
             return
 
         profiles = load_network_profiles()
@@ -2006,6 +2010,9 @@ class ChargingStationController:
             return {"status": "Rejected"}
 
         save_network_profile(slot, conn_data)
+        # Arm an actual profile switch for the next Reset (TC_A_19 / TC_B_13):
+        # a subsequent Reset without this flag must not swap ws_kwargs.
+        self._pending_network_profile_switch = True
         logger.info(
             f"SetNetworkProfile: slot={slot} securityProfile={sp} ocppVersion={ocpp_version} url={url}"
         )

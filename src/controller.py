@@ -1854,13 +1854,7 @@ class ChargingStationController:
         payload: Dict[str, Any],
         response: Dict[str, Any],
     ) -> None:
-        """TC_C_16_CS: handle responses to offline-queued replays.
-
-        For TransactionEvent replays carrying an idToken, mirror the same
-        deauth logic a live call would: update cache, and if the CSMS rejects
-        the token with StopTxOnInvalidId=true, stop the tx with
-        triggerReason=Deauthorized.
-        """
+        """TC_C_16_CS / TC_C_17_CS: handle responses to offline-queued replays."""
         if action != "TransactionEvent":
             return
         id_token = payload.get("idToken") or {}
@@ -1868,17 +1862,48 @@ class ChargingStationController:
         if not raw_uid:
             return
         status = self._update_cache_from_tx_response(response, raw_uid)
-        if (
-            status
-            and status != "Accepted"
-            and self.transaction_id
-            and self._get_bool("TxCtrlr", "StopTxOnInvalidId", True)
-        ):
+        if status and status != "Accepted":
+            await self._handle_tx_auth_rejection(status, id_token)
+
+    async def _handle_tx_auth_rejection(
+        self,
+        status: str,
+        id_token: Optional[Dict[str, Any]],
+    ) -> None:
+        """§C12.FR.04 / FR.05: react to an idTokenInfo that is not Accepted
+        during an active transaction.
+
+        • StopTxOnInvalidId=true  → stop the tx (Ended, reason=DeAuthorized).
+        • StopTxOnInvalidId=false → suspend energy transfer only: open the
+          relay and emit Updated(triggerReason=Deauthorized, chargingState
+          =SuspendedEVSE). Transaction keeps running until cable unplug
+          (TC_C_17_CS).
+        """
+        if not self.transaction_id:
+            return
+        if self._get_bool("TxCtrlr", "StopTxOnInvalidId", True):
             logger.info(
-                f"Replayed TransactionEvent → idTokenInfo.status={status} — "
+                f"StopTxOnInvalidId=true + idTokenInfo.status={status} — "
                 f"stopping tx (Deauthorized)"
             )
             await self.stop_transaction("DeAuthorized", id_token=id_token)
+            return
+        logger.info(
+            f"StopTxOnInvalidId=false + idTokenInfo.status={status} — "
+            f"suspending energy transfer"
+        )
+        try:
+            self.power_contactor_hal.control_relay("Open")
+        except Exception as e:
+            logger.warning(f"Failed to open relay on deauth suspend: {e}")
+        self.is_authorized = False
+        # Omit idToken so OCTT's response to this Updated event doesn't
+        # cascade back into another rejection loop on the same token.
+        await self._send_tx_updated(
+            "Deauthorized",
+            id_token=None,
+            charging_state="SuspendedEVSE",
+        )
 
     async def _send_tx_updated(
         self,
@@ -1933,21 +1958,12 @@ class ChargingStationController:
             self._tx_seq_no = next_seq_no
         # C10_FR_05: only Updated events carrying an idToken (e.g. Authorized /
         # StopAuthorized trigger reasons) receive an idTokenInfo back. Update
-        # cache + deauth-stop when CSMS rejects.
+        # cache + react to CSMS rejection (stop or suspend per StopTxOnInvalidId).
         if id_token is not None:
             raw_uid = id_token.get("idToken")
             status = self._update_cache_from_tx_response(res, raw_uid)
-            if (
-                status
-                and status != "Accepted"
-                and self.transaction_id
-                and self._get_bool("TxCtrlr", "StopTxOnInvalidId", True)
-            ):
-                logger.info(
-                    f"TransactionEvent(Updated,{trigger_reason}) → "
-                    f"idTokenInfo.status={status} — stopping tx"
-                )
-                await self.stop_transaction("DeAuthorized", id_token=id_token)
+            if status and status != "Accepted":
+                await self._handle_tx_auth_rejection(status, id_token)
 
     async def simulate_cable_plugged(self) -> None:
         logger.info("Cable plugged in. Connector Occupied.")
@@ -2034,22 +2050,14 @@ class ChargingStationController:
         except Exception as e:
             logger.error(f"Failed to send Started TransactionEvent (Authorized): {e}")
             res = None
-        # TC_C_34_CS (C10_FR_05 / C12.FR.06): CSMS may reject the token on the
-        # Started response. Update cache and, if StopTxOnInvalidId=true, stop
-        # the freshly-started tx with triggerReason=Deauthorized.
+        # TC_C_34_CS / TC_C_17_CS (C10_FR_05 / C12.FR.06): CSMS may reject the
+        # token on the Started response. Either stop or suspend depending on
+        # StopTxOnInvalidId.
         status = self._update_cache_from_tx_response(res, self._tx_id_token_value)
-        if (
-            status
-            and status != "Accepted"
-            and self.transaction_id
-            and self._get_bool("TxCtrlr", "StopTxOnInvalidId", True)
-        ):
-            logger.info(
-                f"TransactionEvent(Started) → idTokenInfo.status={status} — "
-                f"stopping tx (StopTxOnInvalidId)"
-            )
-            await self.stop_transaction("DeAuthorized", id_token=id_token)
-            return
+        if status and status != "Accepted":
+            await self._handle_tx_auth_rejection(status, id_token)
+            if not self.transaction_id:
+                return
         if not self._meter_task or self._meter_task.done():
             self._meter_task = asyncio.create_task(
                 self._meter_values_loop(self.transaction_id)

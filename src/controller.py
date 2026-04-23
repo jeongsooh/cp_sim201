@@ -273,10 +273,31 @@ class ChargingStationController:
         # TC_B_30_CS: while BootNotification is Pending/Rejected, non-allowed
         # CSMS-initiated actions must be answered with CALLERROR SecurityError.
         self.ocpp_client.set_message_gate(self._boot_state_message_gate)
+        # TC_B_51_CS: reconnect backoff must honour the OCPPCommCtrlr variables
+        # the CSMS sets at runtime (e.g. RetryBackOffWaitMinimum=64).
+        self.ocpp_client.set_retry_config_provider(self._retry_backoff_config)
 
     # ------------------------------------------------------------------
     # Boot-state SecurityError gate (OCPP 2.0.1 §B02/B03)
     # ------------------------------------------------------------------
+
+    def _retry_backoff_config(self):
+        """Return (wait_min_s, random_range_s, repeat_times) from device model.
+
+        Falls back to the static OCPPConfig values when a variable is missing or
+        unparseable. Called by OCPPClient before each reconnect sleep.
+        """
+        from .config import OCPPConfig as _Cfg
+        wait_min = self._get_int(
+            "OCPPCommCtrlr", "RetryBackOffWaitMinimum", _Cfg.RETRY_BACKOFF_WAIT_MINIMUM
+        )
+        random_range = self._get_int(
+            "OCPPCommCtrlr", "RetryBackOffRandomRange", _Cfg.RETRY_BACKOFF_RANDOM_RANGE
+        )
+        repeat_times = self._get_int(
+            "OCPPCommCtrlr", "RetryBackOffRepeatTimes", _Cfg.RETRY_BACKOFF_REPEAT_TIMES
+        )
+        return wait_min, random_range, repeat_times
 
     def _boot_state_message_gate(self, action: str):
         """Return (error_code, desc) to reject the incoming CSMS action, or None to allow.

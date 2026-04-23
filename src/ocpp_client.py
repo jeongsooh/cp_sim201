@@ -45,6 +45,11 @@ class OCPPClient:
         # Used for OCPP 2.0.1 §B02/B03 — SecurityError gating while in
         # Pending/Rejected boot state.
         self._message_gate: Optional[Callable[[str], Optional[Tuple[str, str]]]] = None
+        # Reconnect backoff — provider returns (wait_min_s, random_range_s,
+        # repeat_times) from OCPPCommCtrlr device-model variables, which the
+        # CSMS may change at runtime. Without a provider, the static
+        # OCPPConfig defaults are used.
+        self._retry_config_provider: Optional[Callable[[], Tuple[int, int, int]]] = None
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -107,6 +112,23 @@ class OCPPClient:
     ) -> None:
         self._message_gate = gate
 
+    def set_retry_config_provider(
+        self, provider: Optional[Callable[[], Tuple[int, int, int]]]
+    ) -> None:
+        self._retry_config_provider = provider
+
+    def _retry_config(self) -> Tuple[int, int, int]:
+        if self._retry_config_provider is not None:
+            try:
+                return self._retry_config_provider()
+            except Exception as e:
+                logger.warning(f"retry_config_provider failed, using defaults: {e}")
+        return (
+            OCPPConfig.RETRY_BACKOFF_WAIT_MINIMUM,
+            OCPPConfig.RETRY_BACKOFF_RANDOM_RANGE,
+            OCPPConfig.RETRY_BACKOFF_REPEAT_TIMES,
+        )
+
     async def connect(self) -> None:
         self._is_running = True
         attempt = 0
@@ -144,10 +166,11 @@ class OCPPClient:
                 self._cleanup_pending_calls()
                 if not self._is_running:
                     break
-                step = min(attempt, OCPPConfig.RETRY_BACKOFF_REPEAT_TIMES)
+                wait_min, random_range, repeat_times = self._retry_config()
+                step = min(attempt, repeat_times)
                 wait_time = (
-                    OCPPConfig.RETRY_BACKOFF_WAIT_MINIMUM * (2 ** step)
-                    + random.randint(0, OCPPConfig.RETRY_BACKOFF_RANDOM_RANGE)
+                    wait_min * (2 ** step)
+                    + (random.randint(0, random_range) if random_range > 0 else 0)
                 )
                 logger.info(f"Reconnecting in {wait_time}s (attempt {attempt + 1})...")
                 await asyncio.sleep(wait_time)

@@ -2247,8 +2247,16 @@ class ChargingStationController:
                 self._meter_task = asyncio.create_task(self._meter_values_loop(self.transaction_id))
 
     async def handle_state_c(self) -> None:
-        """Called by main.py ADC monitor when CP voltage drops to +6V (< 40000 ADC)"""
-        if not (self.transaction_id and not self._state_c_active):
+        """Called by main.py ADC monitor when CP voltage drops to +6V (< 40000 ADC).
+
+        TC_C_17_CS: emitting chargingState=Charging requires that we are
+        actually supplying power — i.e. the user is authorized and the relay
+        is closed. If the EV signals State C while we have no authorization
+        yet (tx started on CablePluggedIn alone), we stay silent: the CP
+        transition is just "EV ready", not "charging". The event will fire
+        once authorization arrives and the relay closes.
+        """
+        if not (self.transaction_id and not self._state_c_active and self.is_authorized):
             return
         # Snapshot the txId so a concurrent stop_transaction clearing it mid-flight
         # doesn't leave us sending an event with an invalid id.

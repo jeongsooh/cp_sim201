@@ -2067,10 +2067,33 @@ class ChargingStationController:
         and only commit it onto self._tx_seq_no AFTER the send succeeds, so a
         cancel mid-send (e.g. stop_transaction while an Authorize is in flight
         before it) doesn't burn a seqNo that never reaches the CSMS.
+
+        Stop conditions:
+          • transaction ended (self.transaction_id changes)
+          • SampledDataCtrlr.TxUpdatedInterval <= 0 — OCPP 2.0.1 defines this
+            as "periodic sampled data disabled", so exit the loop cleanly
+            instead of busy-looping with sleep(0).
+          • connector became Available (cable unplugged) — even if
+            StopTxOnEVSideDisconnect=false keeps the tx live, no power flows
+            without an EV, so suppress the emission until the cable is
+            plugged back in (or the tx ends).
         """
         while self.transaction_id == transaction_id:
             interval = self._get_int("SampledDataCtrlr", "TxUpdatedInterval", 60)
+            if interval <= 0:
+                logger.info(
+                    "TxUpdatedInterval<=0 — periodic MeterValue reporting disabled"
+                )
+                return
             await asyncio.sleep(interval)
+
+            if self.transaction_id != transaction_id:
+                return
+            if self.connector_hal.status != "Occupied":
+                logger.debug(
+                    "Connector not Occupied — skipping MeterValuePeriodic emission"
+                )
+                continue
 
             meter_data = self.power_contactor_hal.read_meter_values()
             real_power = meter_data.get("power", 0.0)

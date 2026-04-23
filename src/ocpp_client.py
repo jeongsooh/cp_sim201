@@ -377,6 +377,13 @@ class OCPPClient:
         """
         if not self.ws:
             if allow_offline:
+                # OCPP 2.0.1 TransactionEventRequest has an `offline` flag that
+                # must be true when the event was generated while the CS
+                # couldn't reach the CSMS (TC_C_16_CS Tool validation Step 3).
+                # Stamp it here so the controller side doesn't need to know
+                # whether it was online at emit time.
+                if action == "TransactionEvent":
+                    payload = {**payload, "offline": True}
                 await self.offline_queue.enqueue(action, payload)
                 return {}
             raise ConnectionError("Not connected to CSMS")

@@ -818,6 +818,24 @@ class ChargingStationController:
         asyncio.create_task(self._execute_reset(reset_type))
         return {"status": "Accepted"}
 
+    def _try_execute_deferred_reset(self) -> None:
+        """Fire the pending Reset if the station has reached its expected idle state.
+
+        TC_B_21_CS: for Reset(OnIdle) issued during an active transaction,
+        "idle" means BOTH no active transaction AND the cable is unplugged.
+        Immediate resets were already fired on receipt, so nothing to do here.
+        """
+        if not self._pending_reset:
+            return
+        if self._pending_reset_type == "OnIdle":
+            if self.transaction_id or self.connector_hal.status != "Available":
+                return
+        logger.info(
+            f"Station idle (tx={self.transaction_id}, connector={self.connector_hal.status}) — "
+            f"running deferred Reset({self._pending_reset_type})"
+        )
+        asyncio.create_task(self._execute_reset(self._pending_reset_type))
+
     async def _execute_reset(self, reset_type: str) -> None:
         """Reset의 실제 동작: 활성 프로파일 적용 + WebSocket 종료로 재연결 유도."""
         await asyncio.sleep(0.5)  # CallResult 전송이 끝나도록 유예
@@ -1668,6 +1686,11 @@ class ChargingStationController:
         except Exception as e:
             logger.error(f"Failed to process cable unplug: {e}")
 
+        # TC_B_21_CS: a Reset(OnIdle) that arrived while the cable was plugged
+        # in can only fire once the station is fully idle. Re-check after the
+        # unplug StatusNotification has been sent.
+        self._try_execute_deferred_reset()
+
     async def _meter_values_loop(self, transaction_id: str) -> None:
         """TC_J_02_CS: Periodically reports TransactionEvent(Updated) with MeterValues"""
         while self.transaction_id == transaction_id:
@@ -1826,10 +1849,9 @@ class ChargingStationController:
                 self.device_model["EVSE"]["AvailabilityState"] = ("Inoperative", "ReadOnly")
 
             # TC_B_21_CS: a Reset(OnIdle) received during the transaction
-            # returned "Scheduled"; execute the deferred reboot now.
-            if self._pending_reset:
-                logger.info("Running deferred Reset now that transaction has ended")
-                asyncio.create_task(self._execute_reset(self._pending_reset_type))
+            # returned "Scheduled"; fire the deferred reboot only once the
+            # station is truly idle (tx ended AND cable unplugged).
+            self._try_execute_deferred_reset()
 
     # ------------------------------------------------------------------
     # Block A — Security and Certificates (TC_A_*)

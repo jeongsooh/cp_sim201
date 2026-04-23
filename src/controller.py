@@ -224,6 +224,10 @@ class ChargingStationController:
         # authorizing the tx. A later scan whose Authorize response carries
         # the same groupIdToken grants stop-authority (OCPP 2.0.1 §C09).
         self._tx_group_id_token_value: Optional[str] = None
+        # TC_C_41_CS: keep the full starting idToken dict so the Ended event
+        # reports the tx "owner" (valid_idtoken), not the group-mate that
+        # triggered the stop (per §C09 the tx belongs to the start identifier).
+        self._tx_start_id_token: Optional[Dict[str, Any]] = None
         # TC_C_32_CS: Authorization Cache — persists across reboots.
         # key = idToken value; value = {"idTokenInfo": {...}, "stored_at": epoch}
         self._auth_cache: Dict[str, Dict[str, Any]] = load_auth_cache()
@@ -1663,22 +1667,45 @@ class ChargingStationController:
         if self.transaction_id and self.is_authorized:
             if raw_uid == self._tx_id_token_value:
                 logger.info("Stop-scan (same idToken) — stopping transaction")
-                await self.stop_transaction("Local", id_token=id_token)
+                # TC_C_41_CS: Ended event identifies the tx owner — use the
+                # original starting idToken (same here, but keep consistent).
+                stop_token = self._tx_start_id_token or id_token
+                await self.stop_transaction("Local", id_token=stop_token)
                 return
-            # Different idToken — ask CSMS to authorize; if it returns the
-            # same groupIdToken, the user belongs to the same group and is
-            # allowed to stop the transaction (TC_C_39_CS). Otherwise keep
-            # the transaction running and emit no TransactionEvent
-            # (TC_C_04_CS).
+            # Different idToken — check if it can authorize locally (cached
+            # Accepted + LocalPreAuthorize → skip AuthorizeRequest, TC_C_41_CS)
+            # or ask CSMS to authorize (TC_C_39_CS / TC_C_44_CS). If the result
+            # carries the same groupIdToken the user belongs to the same group
+            # and is allowed to stop the transaction. Otherwise keep the tx
+            # running and emit no TransactionEvent (§C01.FR.03 / TC_C_04_CS).
             logger.info("Scan during active tx with DIFFERENT idToken — checking group")
-            try:
-                res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
-            except Exception as e:
-                logger.error(f"Authorize (different-token scan) failed: {e}")
-                return
-            info = (res or {}).get("idTokenInfo", {}) or {}
+            cache_enabled = self._get_bool("AuthCacheCtrlr", "Enabled", True)
+            pre_auth      = self._get_bool("AuthCtrlr", "LocalPreAuthorize", False)
+            cached_info   = (
+                self._lookup_auth_cache(raw_uid)
+                if (cache_enabled and pre_auth) else None
+            )
+            if cached_info is not None:
+                logger.info(
+                    f"Cache hit for different-token scan {raw_uid} — "
+                    f"skipping AuthorizeRequest"
+                )
+                info = cached_info
+            else:
+                try:
+                    res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
+                except Exception as e:
+                    logger.error(f"Authorize (different-token scan) failed: {e}")
+                    return
+                info = (res or {}).get("idTokenInfo", {}) or {}
+                if info.get("status") == "Accepted" and cache_enabled:
+                    self._auth_cache[raw_uid] = {
+                        "idTokenInfo": info,
+                        "stored_at": time.time(),
+                    }
+                    save_auth_cache(self._auth_cache)
             if info.get("status") != "Accepted":
-                logger.info("Different-token Authorize not Accepted — tx continues")
+                logger.info("Different-token not Accepted — tx continues")
                 return
             other_group = (info.get("groupIdToken") or {}).get("idToken")
             if (
@@ -1690,7 +1717,10 @@ class ChargingStationController:
                     f"Different idToken shares groupIdToken {other_group} — "
                     f"stopping transaction"
                 )
-                await self.stop_transaction("Local", id_token=id_token)
+                # TC_C_41_CS Step 4: Ended event must carry the ORIGINAL
+                # starting idToken, not the group-mate that triggered stop.
+                stop_token = self._tx_start_id_token or id_token
+                await self.stop_transaction("Local", id_token=stop_token)
             else:
                 logger.info("Different idToken without matching group — tx continues")
             return
@@ -1721,6 +1751,7 @@ class ChargingStationController:
                     self.is_authorized = True
                     self._tx_id_token_value = raw_uid
                     self._tx_group_id_token_value = group_id
+                    self._tx_start_id_token = id_token
                     # OCPP 2.0.1 §E02 TxStartPoint OR semantics: if "Authorized"
                     # is in the list, authorization alone starts the
                     # transaction even without the cable connected
@@ -1744,6 +1775,7 @@ class ChargingStationController:
                     self.is_authorized = True
                     self._tx_id_token_value = raw_uid
                     self._tx_group_id_token_value = group_id
+                    self._tx_start_id_token = id_token
                     self.power_contactor_hal.control_relay("Close")
                     await self._send_tx_updated("Authorized", id_token=id_token)
             else:
@@ -2263,6 +2295,7 @@ class ChargingStationController:
             self._state_c_active = False
             self._tx_id_token_value = None
             self._tx_group_id_token_value = None
+            self._tx_start_id_token = None
 
             # Re-apply availability if it was scheduled as Inoperative
             if not self.is_evse_available:

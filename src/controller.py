@@ -1657,13 +1657,18 @@ class ChargingStationController:
                     self.power_contactor_hal.control_relay("Close")
                     await self._send_tx_updated("Authorized", id_token=id_token)
             else:
-                # TC_C_02_CS: per OCPP 2.0.1 §C02, when Authorize is rejected
-                # the CS must NOT emit a TransactionEventRequest. Leave the
-                # transaction running; it will end naturally on cable unplug
-                # (EVDisconnected) or by some other trigger.
+                # TC_C_02_CS / TC_C_07_CS: per OCPP 2.0.1 §C02, when Authorize
+                # is rejected (Expired / Invalid / Unknown / Blocked ...) the
+                # CS must NOT emit any further TransactionEventRequest until
+                # another trigger ends the tx. Cancel the periodic meter-value
+                # loop so it stops pumping MeterValuePeriodic updates; the
+                # transaction stays live and will close out on cable unplug.
                 logger.warning(
-                    f"Authorize rejected: status={status} — leaving transaction as-is"
+                    f"Authorize rejected: status={status} — silencing tx events"
                 )
+                if self._meter_task and not self._meter_task.done():
+                    self._meter_task.cancel()
+                    self._meter_task = None
         except Exception as e:
             logger.error(f"Authorisation call failed: {e}")
 

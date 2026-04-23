@@ -1740,13 +1740,13 @@ class ChargingStationController:
                 charging_state = "EVConnected"
             else:
                 charging_state = "Idle"
-        self._tx_seq_no += 1
+        next_seq_no = self._tx_seq_no + 1
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         payload: Dict[str, Any] = {
             "eventType": "Updated",
             "timestamp": now_iso,
             "triggerReason": trigger_reason,
-            "seqNo": self._tx_seq_no,
+            "seqNo": next_seq_no,
             "evse": {"id": self.evse_id, "connectorId": self.connector_id},
             "transactionInfo": {
                 "transactionId": self.transaction_id,
@@ -1759,6 +1759,10 @@ class ChargingStationController:
             await self.ocpp_client.call("TransactionEvent", payload)
         except Exception as e:
             logger.error(f"Failed to send Updated TransactionEvent ({trigger_reason}): {e}")
+        else:
+            # Reserve the seqNo only on successful send so a cancelled send
+            # doesn't leave a hole in the transaction event sequence.
+            self._tx_seq_no = next_seq_no
 
     async def simulate_cable_plugged(self) -> None:
         logger.info("Cable plugged in. Connector Occupied.")
@@ -1924,7 +1928,13 @@ class ChargingStationController:
         self._try_execute_deferred_reset()
 
     async def _meter_values_loop(self, transaction_id: str) -> None:
-        """TC_J_02_CS: Periodically reports TransactionEvent(Updated) with MeterValues"""
+        """TC_J_02_CS: Periodically reports TransactionEvent(Updated) with MeterValues.
+
+        TC_C_39_CS: seqNo must stay gapless. We reserve the next value locally
+        and only commit it onto self._tx_seq_no AFTER the send succeeds, so a
+        cancel mid-send (e.g. stop_transaction while an Authorize is in flight
+        before it) doesn't burn a seqNo that never reaches the CSMS.
+        """
         while self.transaction_id == transaction_id:
             interval = self._get_int("SampledDataCtrlr", "TxUpdatedInterval", 60)
             await asyncio.sleep(interval)
@@ -1934,14 +1944,14 @@ class ChargingStationController:
             self.meter_value += real_power * (interval / 3600.0)  # Wh
 
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            self._tx_seq_no += 1
+            next_seq_no = self._tx_seq_no + 1
             measurands = self._get_param("SampledDataCtrlr", "TxUpdatedMeasurands",
                                          "Energy.Active.Import.Register")
             payload = {
                 "eventType": "Updated",
                 "timestamp": now_iso,
                 "triggerReason": "MeterValuePeriodic",
-                "seqNo": self._tx_seq_no,
+                "seqNo": next_seq_no,
                 "evse": {"id": self.evse_id, "connectorId": self.connector_id},
                 "transactionInfo": {
                     "transactionId": self.transaction_id
@@ -1958,6 +1968,11 @@ class ChargingStationController:
                 await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
             except Exception as e:
                 logger.error(f"Failed to send meter value: {e}")
+            else:
+                # Commit seqNo only when the CSMS actually accepted the event.
+                # (CancelledError is a BaseException — it skips this branch and
+                # leaves self._tx_seq_no unchanged.)
+                self._tx_seq_no = next_seq_no
 
     async def _try_start_transaction(self) -> None:
         if self.is_authorized and self.connector_hal.status == "Occupied":

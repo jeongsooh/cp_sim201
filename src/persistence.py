@@ -15,6 +15,7 @@ _DATA_DIR = os.path.join(_PROJECT_ROOT, "data")
 _DEVICE_MODEL_FILE = os.path.join(_DATA_DIR, "device_model.json")
 _NETWORK_PROFILES_FILE = os.path.join(_DATA_DIR, "network_profiles.json")
 _CERT_METADATA_FILE = os.path.join(_DATA_DIR, "cert_metadata.json")
+_ADMIN_STATE_FILE = os.path.join(_DATA_DIR, "admin_state.json")
 
 
 def _ensure_data_dir() -> None:
@@ -110,3 +111,31 @@ def save_cert_metadata(metadata: Dict) -> None:
         logger.info(f"Cert metadata saved to {_CERT_METADATA_FILE}")
     except Exception as e:
         logger.warning(f"Failed to save cert metadata: {e}")
+
+
+def load_admin_state() -> Dict:
+    """운영자/CSMS가 지정한 상태(AvailabilityState 등)를 로드.
+
+    OCPP 2.0.1은 AvailabilityState를 ReadOnly로 정의하므로 device_model.json에
+    저장되지 않는다. TC_B_23_CS 처럼 Inoperative 상태를 Reset 이후에도 유지해야
+    할 때는 이 파일에서 복원한다.
+    """
+    _ensure_data_dir()
+    if not os.path.exists(_ADMIN_STATE_FILE):
+        return {}
+    try:
+        with open(_ADMIN_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load admin state: {e}")
+        return {}
+
+
+def save_admin_state(state: Dict) -> None:
+    _ensure_data_dir()
+    try:
+        with open(_ADMIN_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        logger.info(f"Admin state saved to {_ADMIN_STATE_FILE}")
+    except Exception as e:
+        logger.warning(f"Failed to save admin state: {e}")

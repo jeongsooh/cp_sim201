@@ -15,6 +15,8 @@ from .persistence import (
     save_network_profile,
     load_cert_metadata,
     save_cert_metadata,
+    load_admin_state,
+    save_admin_state,
 )
 from .station_config import StationConfig
 
@@ -382,6 +384,14 @@ class ChargingStationController:
         # the SetNetworkProfile + Reset flow, not directly via SetVariables.
         self.device_model["SecurityCtrlr"]["SecurityProfile"] = (str(security_profile), "ReadOnly")
 
+        # TC_B_23_CS: restore admin Inoperative state across reboots. OCPP 2.0.1
+        # defines EVSE.AvailabilityState as ReadOnly (so device_model.json
+        # doesn't persist it); admin_state.json carries this flag.
+        _admin = load_admin_state()
+        if not bool(_admin.get("is_evse_available", True)):
+            self.is_evse_available = False
+            self.device_model["EVSE"]["AvailabilityState"] = ("Inoperative", "ReadOnly")
+
         # Block B — Core / Provisioning
         self.ocpp_client.register_action_handler("Reset",         self.handle_reset_request)
         self.ocpp_client.register_action_handler("GetVariables",  self.handle_get_variables)
@@ -710,7 +720,7 @@ class ChargingStationController:
             # TC_B_03_CS: Accepted 받으면 예약된 재시도 취소
             if self._boot_retry_task and not self._boot_retry_task.done():
                 self._boot_retry_task.cancel()
-            await self.connector_hal.on_status_change(force=True)
+            await self._send_availability_status_notification()
 
             interval = res.get("interval", 300)
             self.device_model["HeartbeatCtrlr"]["HeartbeatInterval"] = (str(interval), "ReadWrite")
@@ -770,7 +780,7 @@ class ChargingStationController:
                     f"Reconnected after connection drop "
                     f"(cert_error={cert_error}), sending StatusNotification."
                 )
-                await self.connector_hal.on_status_change(force=True)
+                await self._send_availability_status_notification()
                 if cert_error:
                     await self._send_security_event_notification("InvalidCsmsCertificate")
         except Exception as e:
@@ -1249,7 +1259,13 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_change_availability(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_G_01_CS: Changes the operational status of the EVSE"""
+        """TC_G_01_CS / TC_B_23_CS: Changes the operational status of the EVSE.
+
+        When the admin status becomes Inoperative, StatusNotification must
+        carry connectorStatus=Unavailable (regardless of whether the cable
+        is physically plugged in); Operative restores the live physical
+        state (Available/Occupied).
+        """
         status = payload["operationalStatus"]
         logger.info(f"ChangeAvailability: {status}")
         if status == "Inoperative":
@@ -1262,8 +1278,33 @@ class ChargingStationController:
             self.is_evse_available = True
             self.device_model["EVSE"]["AvailabilityState"] = ("Available", "ReadOnly")
         save_device_model(self.device_model)
-        asyncio.create_task(self.connector_hal.on_status_change(force=True))
+        save_admin_state({"is_evse_available": self.is_evse_available})
+        asyncio.create_task(self._send_availability_status_notification())
         return {"status": "Accepted"}
+
+    async def _send_availability_status_notification(self) -> None:
+        """Send StatusNotification reflecting admin + physical state.
+
+        Inoperative → connectorStatus "Unavailable".
+        Operative   → live physical state (Available / Occupied).
+        """
+        if self.is_evse_available:
+            self.connector_hal.status = self.connector_hal.read_physical_connection()
+        else:
+            self.connector_hal.status = "Unavailable"
+        payload = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "connectorStatus": self.connector_hal.status,
+            "evseId": self.evse_id,
+            "connectorId": self.connector_id,
+        }
+        logger.info(
+            f"Connector {self.connector_id} admin status → {self.connector_hal.status}"
+        )
+        try:
+            await self.ocpp_client.call("StatusNotification", payload)
+        except Exception as e:
+            logger.error(f"Failed to send availability StatusNotification: {e}")
 
     # ------------------------------------------------------------------
     # Block I — Smart Charging

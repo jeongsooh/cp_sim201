@@ -1825,7 +1825,9 @@ class ChargingStationController:
                 "Remote":          "RemoteStop",
                 "EVDisconnected":  "EVDeparted",
                 "DeAuthorized":    "Deauthorized",
-                "ImmediateReset":  "ImmediateReset",
+                # TC_B_22_CS: Reset(Immediate) ends the tx with stoppedReason
+                # "ImmediateReset" but triggerReason "ResetCommand" (per spec).
+                "ImmediateReset":  "ResetCommand",
             }
             trigger_reason = trigger_reason_map.get(stopped_reason, "StopAuthorized")
 

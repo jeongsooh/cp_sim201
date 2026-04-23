@@ -1388,7 +1388,11 @@ class ChargingStationController:
             return {"status": "Rejected"}
 
         id_token = payload["idToken"]
-        logger.info(f"RequestStartTransaction: authorizing token {id_token.get('idToken')}")
+        remote_start_id = payload.get("remoteStartId")
+        logger.info(
+            f"RequestStartTransaction: token={id_token.get('idToken')} "
+            f"remoteStartId={remote_start_id}"
+        )
 
         if self._get_bool("AuthCtrlr", "AuthorizeRemoteStart", True):
             try:
@@ -1401,7 +1405,29 @@ class ChargingStationController:
                 return {"status": "Rejected"}
 
         self.is_authorized = True
-        asyncio.create_task(self._try_start_transaction())
+        self._tx_id_token_value = id_token.get("idToken")
+        self._tx_group_id_token_value = None
+        # TC_E_13_CS §E01.FR.03: with TxStartPoint OR-semantics, authorization
+        # alone (remote) must start the tx immediately — Started(RemoteStart)
+        # carrying remoteStartId + idToken. If Authorized is not a configured
+        # start point, fall back to the AND-style waiter that needs cable plug.
+        tx_start_points = [
+            p.strip()
+            for p in self._get_param("TxCtrlr", "TxStartPoint", "").split(",")
+            if p.strip()
+        ]
+        if "Authorized" in tx_start_points:
+            asyncio.create_task(
+                self._start_tx_on_authorized(
+                    id_token,
+                    trigger_reason="RemoteStart",
+                    remote_start_id=remote_start_id,
+                )
+            )
+            if self.connector_hal.status == "Occupied":
+                self.power_contactor_hal.control_relay("Close")
+        else:
+            asyncio.create_task(self._try_start_transaction())
         return {"status": "Accepted"}
 
     async def handle_request_stop_transaction(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2012,13 +2038,22 @@ class ChargingStationController:
         else:
             await self._try_start_transaction()
 
-    async def _start_tx_on_authorized(self, id_token: Dict[str, Any]) -> None:
+    async def _start_tx_on_authorized(
+        self,
+        id_token: Dict[str, Any],
+        trigger_reason: str = "Authorized",
+        remote_start_id: Optional[int] = None,
+    ) -> None:
         """Start a transaction triggered by authorization before cable plug.
 
         [OCPP 2.0.1 §E02] TxStartPoint "Authorized" — emit TransactionEvent
-        with eventType=Started and triggerReason=Authorized when the user is
-        authorized, regardless of cable state. chargingState reflects whether
-        the EV is connected yet.
+        with eventType=Started when the user is authorized, regardless of
+        cable state. chargingState reflects whether the EV is connected yet.
+
+        trigger_reason: "Authorized" for local RFID flows; "RemoteStart" for
+            CSMS-initiated RequestStartTransaction (TC_E_13_CS).
+        remote_start_id: RequestStartTransaction remoteStartId — included in
+            transactionInfo when present (TC_E_13_CS / F02).
         """
         if self.transaction_id:
             return
@@ -2042,17 +2077,20 @@ class ChargingStationController:
         charging_state = (
             "EVConnected" if self.connector_hal.status == "Occupied" else "Idle"
         )
+        transaction_info: Dict[str, Any] = {
+            "transactionId": self.transaction_id,
+            "chargingState": charging_state,
+        }
+        if remote_start_id is not None:
+            transaction_info["remoteStartId"] = remote_start_id
         payload = {
             "eventType": "Started",
             "timestamp": now_iso,
-            "triggerReason": "Authorized",
+            "triggerReason": trigger_reason,
             "seqNo": self._tx_seq_no,
             "evse": {"id": self.evse_id, "connectorId": self.connector_id},
             "idToken": id_token,
-            "transactionInfo": {
-                "transactionId": self.transaction_id,
-                "chargingState": charging_state,
-            },
+            "transactionInfo": transaction_info,
             "meterValue": [{
                 "timestamp": now_iso,
                 "sampledValue": self._build_sampled_values(
@@ -2062,9 +2100,9 @@ class ChargingStationController:
         }
         try:
             res = await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
-            logger.info(f"Transaction started (Authorized): {self.transaction_id}")
+            logger.info(f"Transaction started ({trigger_reason}): {self.transaction_id}")
         except Exception as e:
-            logger.error(f"Failed to send Started TransactionEvent (Authorized): {e}")
+            logger.error(f"Failed to send Started TransactionEvent ({trigger_reason}): {e}")
             res = None
         # TC_C_34_CS / TC_C_17_CS (C10_FR_05 / C12.FR.06): CSMS may reject the
         # token on the Started response. Either stop or suspend depending on

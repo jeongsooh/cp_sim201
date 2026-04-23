@@ -2026,6 +2026,13 @@ class ChargingStationController:
         self.meter_value = 0.0
         self._state_c_active = False
         self._tx_seq_no = 0
+        # TC_E_05_CS: arm the EVConnectionTimeOut watchdog BEFORE sending the
+        # Started event. OCTT measures the timeout from the moment it
+        # accepted the Authorize, and the TransactionEvent(Started) send can
+        # take several seconds (TLS / meter reads), pushing the observed
+        # interval past EVConnectionTimeOut.
+        if self.connector_hal.status != "Occupied":
+            self._schedule_ev_connect_timeout()
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         measurands = self._get_param(
             "SampledDataCtrlr", "TxStartedMeasurands",
@@ -2071,11 +2078,6 @@ class ChargingStationController:
             self._meter_task = asyncio.create_task(
                 self._meter_values_loop(self.transaction_id)
             )
-        # TC_E_05_CS: authorization happened before the cable was connected;
-        # arm the watchdog. If the EV isn't plugged in within
-        # TxCtrlr.EVConnectionTimeOut seconds we must deauthorize the tx.
-        if self.connector_hal.status != "Occupied":
-            self._schedule_ev_connect_timeout()
 
     def _schedule_ev_connect_timeout(self) -> None:
         """TC_E_05_CS: arm (or re-arm) the EV cable-plug watchdog."""

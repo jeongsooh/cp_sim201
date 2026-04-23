@@ -734,21 +734,32 @@ class ChargingStationController:
                 })
                 continue
             comp_data = self.device_model[comp]
-            if var in comp_data:
-                val, _ = comp_data[var]
-                results.append({
-                    "attributeStatus": "Accepted",
-                    "component": item["component"],
-                    "variable": item["variable"],
-                    "attributeType": attr,
-                    "attributeValue": val,
-                })
-            else:
+            if var not in comp_data:
                 results.append({
                     "attributeStatus": "UnknownVariable",
                     "component": item["component"],
                     "variable": item["variable"],
                 })
+                continue
+            # TC_B_34_CS: we only store "Actual" values — Target/MinSet/MaxSet
+            # aren't tracked, so requests for them must return
+            # NotSupportedAttributeType rather than silently echoing Actual.
+            if attr != "Actual":
+                results.append({
+                    "attributeStatus": "NotSupportedAttributeType",
+                    "component": item["component"],
+                    "variable": item["variable"],
+                    "attributeType": attr,
+                })
+                continue
+            val, _ = comp_data[var]
+            results.append({
+                "attributeStatus": "Accepted",
+                "component": item["component"],
+                "variable": item["variable"],
+                "attributeType": attr,
+                "attributeValue": val,
+            })
         logger.info(f"GetVariables: returning {len(results)} results")
         return {"getVariableResult": results}
 
@@ -764,24 +775,26 @@ class ChargingStationController:
             comp = item["component"]["name"]
             var  = item["variable"]["name"]
             val  = item["attributeValue"]
+            attr = item.get("attributeType", "Actual")
             if comp not in self.device_model:
                 status = "UnknownComponent"
+            elif var not in self.device_model[comp]:
+                status = "UnknownVariable"
+            elif attr != "Actual":
+                # Only Actual is stored; Target/MinSet/MaxSet are not supported.
+                status = "NotSupportedAttributeType"
             else:
-                comp_data = self.device_model[comp]
-                if var in comp_data:
-                    _, mutability = comp_data[var]
-                    if mutability == "ReadOnly":
-                        status = "ReadOnly"
-                    else:
-                        rejection = self._validate_variable_value(comp, var, val)
-                        if rejection:
-                            status = rejection
-                        else:
-                            self.device_model[comp][var] = (val, mutability)
-                            self._apply_variable_change(comp, var, val)
-                            status = "Accepted"
+                _, mutability = self.device_model[comp][var]
+                if mutability == "ReadOnly":
+                    status = "ReadOnly"
                 else:
-                    status = "UnknownVariable"
+                    rejection = self._validate_variable_value(comp, var, val)
+                    if rejection:
+                        status = rejection
+                    else:
+                        self.device_model[comp][var] = (val, mutability)
+                        self._apply_variable_change(comp, var, val)
+                        status = "Accepted"
             results.append({
                 "attributeStatus": status,
                 "component": item["component"],

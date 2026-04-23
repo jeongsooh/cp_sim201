@@ -213,6 +213,10 @@ class ChargingStationController:
         # subsequent scan with a DIFFERENT idToken does not stop the
         # transaction (per OCPP 2.0.1 §C01.FR.03).
         self._tx_id_token_value: Optional[str] = None
+        # TC_C_39_CS: also remember the groupIdToken that CSMS returned when
+        # authorizing the tx. A later scan whose Authorize response carries
+        # the same groupIdToken grants stop-authority (OCPP 2.0.1 §C09).
+        self._tx_group_id_token_value: Optional[str] = None
         self.transaction_id: str | None = None
         self.meter_value: float = 0.0
         self._state_c_active: bool = False
@@ -1633,24 +1637,47 @@ class ChargingStationController:
         if self.transaction_id and self.is_authorized:
             if raw_uid == self._tx_id_token_value:
                 logger.info("Stop-scan (same idToken) — stopping transaction")
-                await self.stop_transaction("Local")
+                await self.stop_transaction("Local", id_token=id_token)
                 return
-            logger.info(
-                "Scan during active tx with DIFFERENT idToken — Authorize only, "
-                "tx continues"
-            )
+            # Different idToken — ask CSMS to authorize; if it returns the
+            # same groupIdToken, the user belongs to the same group and is
+            # allowed to stop the transaction (TC_C_39_CS). Otherwise keep
+            # the transaction running and emit no TransactionEvent
+            # (TC_C_04_CS).
+            logger.info("Scan during active tx with DIFFERENT idToken — checking group")
             try:
-                await self.ocpp_client.call("Authorize", {"idToken": id_token})
+                res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
             except Exception as e:
                 logger.error(f"Authorize (different-token scan) failed: {e}")
+                return
+            info = (res or {}).get("idTokenInfo", {}) or {}
+            if info.get("status") != "Accepted":
+                logger.info("Different-token Authorize not Accepted — tx continues")
+                return
+            other_group = (info.get("groupIdToken") or {}).get("idToken")
+            if (
+                self._tx_group_id_token_value
+                and other_group
+                and other_group == self._tx_group_id_token_value
+            ):
+                logger.info(
+                    f"Different idToken shares groupIdToken {other_group} — "
+                    f"stopping transaction"
+                )
+                await self.stop_transaction("Local", id_token=id_token)
+            else:
+                logger.info("Different idToken without matching group — tx continues")
             return
         try:
             res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
-            status = (res or {}).get("idTokenInfo", {}).get("status")
+            id_token_info = (res or {}).get("idTokenInfo", {}) or {}
+            status = id_token_info.get("status")
+            group_id = (id_token_info.get("groupIdToken") or {}).get("idToken")
             if status == "Accepted":
                 if not self.transaction_id:
                     self.is_authorized = True
                     self._tx_id_token_value = raw_uid
+                    self._tx_group_id_token_value = group_id
                     # OCPP 2.0.1 §E02 TxStartPoint OR semantics: if "Authorized"
                     # is in the list, authorization alone starts the
                     # transaction even without the cable connected
@@ -1673,6 +1700,7 @@ class ChargingStationController:
                     # case was handled by the early return above.)
                     self.is_authorized = True
                     self._tx_id_token_value = raw_uid
+                    self._tx_group_id_token_value = group_id
                     self.power_contactor_hal.control_relay("Close")
                     await self._send_tx_updated("Authorized", id_token=id_token)
             else:
@@ -1994,7 +2022,11 @@ class ChargingStationController:
         except Exception as e:
             logger.error(f"handle_state_c: TransactionEvent call failed: {e}")
 
-    async def stop_transaction(self, stopped_reason: str = "Local") -> None:
+    async def stop_transaction(
+        self,
+        stopped_reason: str = "Local",
+        id_token: Optional[Dict[str, Any]] = None,
+    ) -> None:
         if self.transaction_id:
             self.power_contactor_hal.control_relay("Open")
             # Restore 100% PWM (+12V Standing State)
@@ -2027,7 +2059,7 @@ class ChargingStationController:
             charging_state = (
                 "EVConnected" if self.connector_hal.status == "Occupied" else "Idle"
             )
-            payload = {
+            payload: Dict[str, Any] = {
                 "eventType": "Ended",
                 "timestamp": now_iso,
                 "triggerReason": trigger_reason,
@@ -2046,11 +2078,16 @@ class ChargingStationController:
                     }
                 ]
             }
+            # TC_C_39_CS: include the stopping token on the Ended event when
+            # the stop was triggered by a scan.
+            if id_token is not None:
+                payload["idToken"] = id_token
             await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
             self.transaction_id = None
             self.is_authorized = False
             self._state_c_active = False
             self._tx_id_token_value = None
+            self._tx_group_id_token_value = None
 
             # Re-apply availability if it was scheduled as Inoperative
             if not self.is_evse_available:

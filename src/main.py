@@ -63,9 +63,31 @@ async def rfid_monitor(controller: ChargingStationController) -> None:
         logger.warning("RFID monitor cannot start hardware loop.")
         ser = None
 
+    # Test/debug injection path: tests like TC_C_41_CS / TC_C_44_CS prompt
+    # for a second physical RFID card (idToken2) that the hardware setup may
+    # not have. Writing a UID string to /tmp/rfid_inject simulates a scan
+    # (the file is consumed on read). Example:
+    #     echo 1040009970605875 > /tmp/rfid_inject
+    inject_path = "/tmp/rfid_inject"
     while True:
         await asyncio.sleep(0.5) # Poll interval
         try:
+            injected = ""
+            if os.path.exists(inject_path):
+                try:
+                    with open(inject_path, "r") as f:
+                        injected = f.read().strip()
+                finally:
+                    try:
+                        os.remove(inject_path)
+                    except Exception:
+                        pass
+            if injected:
+                logger.info(f"=====================================")
+                logger.info(f"   RFID TAG INJECTED: [{injected}]")
+                logger.info(f"=====================================")
+                await controller.handle_rfid_scan(injected)
+                continue
             if ser:
                 uid = await asyncio.to_thread(blocking_read_rfid, ser)
                 if uid:

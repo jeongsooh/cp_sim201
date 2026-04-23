@@ -1417,6 +1417,14 @@ class ChargingStationController:
         # RFID reader is a keycode string as far as OCPP is concerned. Keep
         # type as "KeyCode" so the authorize payload matches OCTT expectations.
         id_token = {"idToken": raw_uid, "type": "KeyCode"}
+        # TC_B_21_CS: a second scan while an authorized transaction is live
+        # stops the transaction locally. Per OCPP 2.0.1 §C03 the CS does NOT
+        # re-issue AuthorizeRequest for a stop-scan of the same token — it
+        # just closes out the transaction.
+        if self.transaction_id and self.is_authorized:
+            logger.info("Stop-scan while authorized tx active — stopping transaction")
+            await self.stop_transaction("Local")
+            return
         try:
             res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
             status = (res or {}).get("idTokenInfo", {}).get("status")
@@ -1439,14 +1447,13 @@ class ChargingStationController:
                             self.power_contactor_hal.control_relay("Close")
                     else:
                         await self._try_start_transaction()
-                elif not self.is_authorized:
+                else:
                     # tx started by EVConnected trigger; this scan authorizes it.
+                    # (is_authorized must be False here — the authorized+active
+                    # case was handled by the early return above.)
                     self.is_authorized = True
                     self.power_contactor_hal.control_relay("Close")
                     await self._send_tx_updated("Authorized", id_token=id_token)
-                else:
-                    # Already authorized and tx active — second scan = local stop
-                    await self.stop_transaction("Local")
             else:
                 # TC_C_02_CS: per OCPP 2.0.1 §C02, when Authorize is rejected
                 # the CS must NOT emit a TransactionEventRequest. Leave the

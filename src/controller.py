@@ -1787,6 +1787,12 @@ class ChargingStationController:
             meter_data = self.power_contactor_hal.read_meter_values()
             measurands = self._get_param("SampledDataCtrlr", "TxEndedMeasurands",
                                          "Energy.Active.Import.Register")
+            # TC_B_21_CS: chargingState on Ended reflects the state at stop
+            # time — EVConnected when the cable is still plugged in (Local /
+            # StopAuthorized stop), Idle once the cable is unplugged.
+            charging_state = (
+                "EVConnected" if self.connector_hal.status == "Occupied" else "Idle"
+            )
             payload = {
                 "eventType": "Ended",
                 "timestamp": now_iso,
@@ -1795,7 +1801,8 @@ class ChargingStationController:
                 "evse": {"id": self.evse_id, "connectorId": self.connector_id},
                 "transactionInfo": {
                     "transactionId": self.transaction_id,
-                    "stoppedReason": stopped_reason
+                    "stoppedReason": stopped_reason,
+                    "chargingState": charging_state,
                 },
                 "meterValue": [
                     {

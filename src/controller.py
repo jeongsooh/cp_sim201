@@ -788,10 +788,13 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_reset_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_B_08_CS: Handles incoming ResetRequest from CSMS.
+        """TC_B_08_CS / TC_B_21_CS: Handles incoming ResetRequest from CSMS.
 
-        Accepted 응답을 먼저 반환하고, 백그라운드 태스크에서 활성 네트워크 프로파일을
-        적용한 뒤 WebSocket을 닫아 재연결 루프가 새 설정으로 접속하도록 한다.
+        - Immediate: Accept and reboot right away.
+        - OnIdle with no active transaction: Accept and reboot right away.
+        - OnIdle with an active transaction: respond "Scheduled"; the reboot is
+          deferred until the transaction ends (per OCPP 2.0.1 ResetStatusEnumType).
+
         재연결 직후 `_on_reconnect`가 `_pending_reset` 플래그를 소비해
         `BootNotification(reason=RemoteReset)`을 전송한다.
         """
@@ -799,6 +802,13 @@ class ChargingStationController:
         logger.info(f"Received ResetRequest: {reset_type}")
         self._pending_reset = True
         self._pending_reset_type = reset_type
+        if reset_type == "OnIdle" and self.transaction_id:
+            # _execute_reset will be invoked from stop_transaction() once the
+            # ongoing transaction ends; don't launch the reboot task now.
+            logger.info(
+                f"Reset(OnIdle) scheduled; active tx {self.transaction_id} must end first"
+            )
+            return {"status": "Scheduled"}
         asyncio.create_task(self._execute_reset(reset_type))
         return {"status": "Accepted"}
 
@@ -1796,6 +1806,12 @@ class ChargingStationController:
             # Re-apply availability if it was scheduled as Inoperative
             if not self.is_evse_available:
                 self.device_model["EVSE"]["AvailabilityState"] = ("Inoperative", "ReadOnly")
+
+            # TC_B_21_CS: a Reset(OnIdle) received during the transaction
+            # returned "Scheduled"; execute the deferred reboot now.
+            if self._pending_reset:
+                logger.info("Running deferred Reset now that transaction has ended")
+                asyncio.create_task(self._execute_reset(self._pending_reset_type))
 
     # ------------------------------------------------------------------
     # Block A — Security and Certificates (TC_A_*)

@@ -224,10 +224,6 @@ class ChargingStationController:
         # authorizing the tx. A later scan whose Authorize response carries
         # the same groupIdToken grants stop-authority (OCPP 2.0.1 §C09).
         self._tx_group_id_token_value: Optional[str] = None
-        # TC_C_41_CS: keep the full starting idToken dict so the Ended event
-        # reports the tx "owner" (valid_idtoken), not the group-mate that
-        # triggered the stop (per §C09 the tx belongs to the start identifier).
-        self._tx_start_id_token: Optional[Dict[str, Any]] = None
         # TC_C_32_CS: Authorization Cache — persists across reboots.
         # key = idToken value; value = {"idTokenInfo": {...}, "stored_at": epoch}
         self._auth_cache: Dict[str, Dict[str, Any]] = load_auth_cache()
@@ -1667,10 +1663,7 @@ class ChargingStationController:
         if self.transaction_id and self.is_authorized:
             if raw_uid == self._tx_id_token_value:
                 logger.info("Stop-scan (same idToken) — stopping transaction")
-                # TC_C_41_CS: Ended event identifies the tx owner — use the
-                # original starting idToken (same here, but keep consistent).
-                stop_token = self._tx_start_id_token or id_token
-                await self.stop_transaction("Local", id_token=stop_token)
+                await self.stop_transaction("Local", id_token=id_token)
                 return
             # Different idToken — check if it can authorize locally (cached
             # Accepted + LocalPreAuthorize → skip AuthorizeRequest, TC_C_41_CS)
@@ -1717,10 +1710,11 @@ class ChargingStationController:
                     f"Different idToken shares groupIdToken {other_group} — "
                     f"stopping transaction"
                 )
-                # TC_C_41_CS Step 4: Ended event must carry the ORIGINAL
-                # starting idToken, not the group-mate that triggered stop.
-                stop_token = self._tx_start_id_token or id_token
-                await self.stop_transaction("Local", id_token=stop_token)
+                # TC_C_41_CS: Ended event's idToken identifies the token that
+                # triggered the stop — i.e. the group-mate idToken2, not the
+                # original starter. OCTT's <Configured valid_idtoken_idtoken>
+                # placeholder is context-bound, not a fixed value.
+                await self.stop_transaction("Local", id_token=id_token)
             else:
                 logger.info("Different idToken without matching group — tx continues")
             return
@@ -1751,7 +1745,6 @@ class ChargingStationController:
                     self.is_authorized = True
                     self._tx_id_token_value = raw_uid
                     self._tx_group_id_token_value = group_id
-                    self._tx_start_id_token = id_token
                     # OCPP 2.0.1 §E02 TxStartPoint OR semantics: if "Authorized"
                     # is in the list, authorization alone starts the
                     # transaction even without the cable connected
@@ -1775,7 +1768,6 @@ class ChargingStationController:
                     self.is_authorized = True
                     self._tx_id_token_value = raw_uid
                     self._tx_group_id_token_value = group_id
-                    self._tx_start_id_token = id_token
                     self.power_contactor_hal.control_relay("Close")
                     await self._send_tx_updated("Authorized", id_token=id_token)
             else:
@@ -2295,7 +2287,6 @@ class ChargingStationController:
             self._state_c_active = False
             self._tx_id_token_value = None
             self._tx_group_id_token_value = None
-            self._tx_start_id_token = None
 
             # Re-apply availability if it was scheduled as Inoperative
             if not self.is_evse_available:

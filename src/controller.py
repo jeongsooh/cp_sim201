@@ -218,6 +218,10 @@ class ChargingStationController:
         self._meter_task = None
         self._pending_reset: bool = False
         self._pending_reset_type: str = "Immediate"
+        # Whether the Reset was answered with "Scheduled" (only true when
+        # OnIdle deferred the reboot due to an active transaction). Drives
+        # the BootNotification reason: ScheduledReset vs RemoteReset.
+        self._pending_reset_scheduled: bool = False
         # TC_B_20/TC_B_21_CS: only switch live ws_kwargs on Reset when a
         # SetNetworkProfile has actually armed a profile switch since last boot.
         # Without this, a plain Reset would re-apply whatever slot the
@@ -752,14 +756,17 @@ class ChargingStationController:
         """연결 성립 시 호출. 최초 부팅 또는 Reset 후에만 BootNotification 전송."""
         try:
             if self._pending_reset:
-                # OCPP 2.0.1 BootReasonEnumType: OnIdle was answered with
-                # "Scheduled" earlier, so boot reason must be ScheduledReset;
-                # Immediate resets keep reason=RemoteReset (TC_B_21_CS).
+                # OCPP 2.0.1 BootReasonEnumType: only use ScheduledReset when
+                # the ResetResponse was actually "Scheduled" (OnIdle +
+                # active tx, TC_B_21). An OnIdle with no active tx is
+                # answered "Accepted" and reboots like a RemoteReset
+                # (TC_B_23).
                 boot_reason = (
-                    "ScheduledReset" if self._pending_reset_type == "OnIdle"
+                    "ScheduledReset" if self._pending_reset_scheduled
                     else "RemoteReset"
                 )
                 self._pending_reset = False
+                self._pending_reset_scheduled = False
                 self._first_connect = False
                 await self.boot_routine(reason=boot_reason)
                 # TC_B_21_CS step 11: after a post-Reset boot, the CS must
@@ -829,12 +836,14 @@ class ChargingStationController:
         logger.info(f"Received ResetRequest: {reset_type}")
         self._pending_reset = True
         self._pending_reset_type = reset_type
+        self._pending_reset_scheduled = False
         if reset_type == "OnIdle" and self.transaction_id:
             # _execute_reset will be invoked from stop_transaction() once the
             # ongoing transaction ends; don't launch the reboot task now.
             logger.info(
                 f"Reset(OnIdle) scheduled; active tx {self.transaction_id} must end first"
             )
+            self._pending_reset_scheduled = True
             return {"status": "Scheduled"}
         asyncio.create_task(self._execute_reset(reset_type))
         return {"status": "Accepted"}

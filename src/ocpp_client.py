@@ -35,6 +35,12 @@ class OCPPClient:
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self._pending_calls: Dict[str, asyncio.Future] = {}
         self._pending_actions: Dict[str, str] = {}
+        # OCPP 2.0.1 §4.1: only one CALL may be outstanding from a given side
+        # at a time. Serialize outgoing CS->CSMS CALLs so that meter-value
+        # TransactionEvents, StatusNotifications, etc. can't race.
+        # CSMS-initiated CALLs (handled via _send_result/_send_error) are
+        # unaffected — they don't go through this lock.
+        self._call_lock = asyncio.Lock()
         self._listen_task: Optional[asyncio.Task] = None
         self._is_running = False
 
@@ -330,23 +336,24 @@ class OCPPClient:
         except ValueError as e:
             raise WaitQueueError(f"Client payload validation failed: {e}")
 
-        msg_id   = str(uuid.uuid4())
-        call_msg = [OCPPConfig.MESSAGE_TYPE_CALL, msg_id, action, payload]
+        async with self._call_lock:
+            msg_id   = str(uuid.uuid4())
+            call_msg = [OCPPConfig.MESSAGE_TYPE_CALL, msg_id, action, payload]
 
-        future = asyncio.get_event_loop().create_future()
-        self._pending_calls[msg_id]  = future
-        self._pending_actions[msg_id] = action
+            future = asyncio.get_event_loop().create_future()
+            self._pending_calls[msg_id]  = future
+            self._pending_actions[msg_id] = action
 
-        try:
-            raw_msg = json.dumps(call_msg)
-            logger.info(f"WS SEND: msgId={msg_id} action={action} payload={raw_msg[:200]}")
-            await self.ws.send(raw_msg)
-            return await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
-            raise WaitQueueError(f"Timeout waiting for response to {action}")
-        finally:
-            self._pending_calls.pop(msg_id, None)
-            self._pending_actions.pop(msg_id, None)
+            try:
+                raw_msg = json.dumps(call_msg)
+                logger.info(f"WS SEND: msgId={msg_id} action={action} payload={raw_msg[:200]}")
+                await self.ws.send(raw_msg)
+                return await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                raise WaitQueueError(f"Timeout waiting for response to {action}")
+            finally:
+                self._pending_calls.pop(msg_id, None)
+                self._pending_actions.pop(msg_id, None)
 
     async def _send_result(self, msg_id: str, payload: Dict) -> None:
         if not self.ws:

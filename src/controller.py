@@ -834,13 +834,15 @@ class ChargingStationController:
 
         TC_B_21_CS: for Reset(OnIdle) issued during an active transaction,
         "idle" means BOTH no active transaction AND the cable is unplugged.
-        Immediate resets were already fired on receipt, so nothing to do here.
+        Immediate resets are fired directly from handle_reset_request and
+        must not be re-scheduled here.
         """
         if not self._pending_reset:
             return
-        if self._pending_reset_type == "OnIdle":
-            if self.transaction_id or self.connector_hal.status != "Available":
-                return
+        if self._pending_reset_type != "OnIdle":
+            return
+        if self.transaction_id or self.connector_hal.status != "Available":
+            return
         logger.info(
             f"Station idle (tx={self.transaction_id}, connector={self.connector_hal.status}) — "
             f"running deferred Reset({self._pending_reset_type})"
@@ -856,6 +858,10 @@ class ChargingStationController:
             )
             # 범위 밖: 트랜잭션 종료 후 재시도 — 현재 OCTT 테스트에서 미발생
             return
+        # TC_B_22_CS: Reset(Immediate) must end any active transaction before
+        # closing the WebSocket; trigger/stopped reason = ImmediateReset.
+        if reset_type == "Immediate" and self.transaction_id:
+            await self.stop_transaction("ImmediateReset")
         try:
             await self._apply_active_network_profile()
         except Exception as e:
@@ -1819,6 +1825,7 @@ class ChargingStationController:
                 "Remote":          "RemoteStop",
                 "EVDisconnected":  "EVDeparted",
                 "DeAuthorized":    "Deauthorized",
+                "ImmediateReset":  "ImmediateReset",
             }
             trigger_reason = trigger_reason_map.get(stopped_reason, "StopAuthorized")
 

@@ -16,6 +16,7 @@ _DEVICE_MODEL_FILE = os.path.join(_DATA_DIR, "device_model.json")
 _NETWORK_PROFILES_FILE = os.path.join(_DATA_DIR, "network_profiles.json")
 _CERT_METADATA_FILE = os.path.join(_DATA_DIR, "cert_metadata.json")
 _ADMIN_STATE_FILE = os.path.join(_DATA_DIR, "admin_state.json")
+_AUTH_CACHE_FILE = os.path.join(_DATA_DIR, "auth_cache.json")
 
 
 def _ensure_data_dir() -> None:
@@ -139,3 +140,29 @@ def save_admin_state(state: Dict) -> None:
         logger.info(f"Admin state saved to {_ADMIN_STATE_FILE}")
     except Exception as e:
         logger.warning(f"Failed to save admin state: {e}")
+
+
+def load_auth_cache() -> Dict[str, Dict]:
+    """TC_C_32_CS: 재부팅 후에도 유지되는 AuthorizeRequest 캐시.
+
+    key: idToken 문자열, value: {"idTokenInfo": {...}, "stored_at": epoch seconds}
+    """
+    _ensure_data_dir()
+    if not os.path.exists(_AUTH_CACHE_FILE):
+        return {}
+    try:
+        with open(_AUTH_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load auth cache: {e}")
+        return {}
+
+
+def save_auth_cache(cache: Dict[str, Dict]) -> None:
+    _ensure_data_dir()
+    try:
+        with open(_AUTH_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+        logger.debug(f"Auth cache saved to {_AUTH_CACHE_FILE} ({len(cache)} entries)")
+    except Exception as e:
+        logger.warning(f"Failed to save auth cache: {e}")

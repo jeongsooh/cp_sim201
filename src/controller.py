@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
@@ -17,6 +18,8 @@ from .persistence import (
     save_cert_metadata,
     load_admin_state,
     save_admin_state,
+    load_auth_cache,
+    save_auth_cache,
 )
 from .station_config import StationConfig
 
@@ -80,6 +83,9 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("LocalAuthListCtrlr", "Entries"): "integer",
     ("LocalAuthListCtrlr", "BytesPerMessage"): "integer",
     ("LocalAuthListCtrlr", "ItemsPerMessage"): "integer",
+    ("AuthCacheCtrlr", "Enabled"): "boolean",
+    ("AuthCacheCtrlr", "LifeTime"): "integer",
+    ("AuthCacheCtrlr", "DisablePostAuthorize"): "boolean",
     ("SmartChargingCtrlr", "Enabled"): "boolean",
     ("SmartChargingCtrlr", "Entries"): "integer",
     ("SmartChargingCtrlr", "LimitChangeSignificance"): "decimal",
@@ -136,6 +142,7 @@ _VAR_UNITS: Dict[tuple, str] = {
     ("SampledDataCtrlr", "TxUpdatedInterval"): "s",
     ("SampledDataCtrlr", "TxEndedInterval"): "s",
     ("SecurityCtrlr", "CertSigningWaitMinimum"): "s",
+    ("AuthCacheCtrlr", "LifeTime"): "s",
 }
 
 # Instanced device-model entries (OCPP 2.0.1 VariableType.instance) that can't
@@ -217,6 +224,9 @@ class ChargingStationController:
         # authorizing the tx. A later scan whose Authorize response carries
         # the same groupIdToken grants stop-authority (OCPP 2.0.1 §C09).
         self._tx_group_id_token_value: Optional[str] = None
+        # TC_C_32_CS: Authorization Cache — persists across reboots.
+        # key = idToken value; value = {"idTokenInfo": {...}, "stored_at": epoch}
+        self._auth_cache: Dict[str, Dict[str, Any]] = load_auth_cache()
         self.transaction_id: str | None = None
         self.meter_value: float = 0.0
         self._state_c_active: bool = False
@@ -369,6 +379,13 @@ class ChargingStationController:
                 "Entries":        ("100",  "ReadOnly"),
                 "BytesPerMessage":("65000","ReadOnly"),
                 "ItemsPerMessage":("20",   "ReadOnly"),
+            },
+            # TC_C_32_CS: Authorization Cache — skips re-Authorize for tokens
+            # the CSMS already accepted. Persists across reboots.
+            "AuthCacheCtrlr": {
+                "Enabled":              ("true",  "ReadWrite"),
+                "LifeTime":             ("86400", "ReadWrite"),
+                "DisablePostAuthorize": ("false", "ReadWrite"),
             },
             "SmartChargingCtrlr": {
                 "Enabled":                 ("false", "ReadWrite"),
@@ -1287,6 +1304,8 @@ class ChargingStationController:
 
     async def handle_clear_cache(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """TC_C_05_CS: Clears local authorization cache"""
+        self._auth_cache = {}
+        save_auth_cache(self._auth_cache)
         logger.info("ClearCache received — cache cleared")
         return {"status": "Accepted"}
 
@@ -1668,10 +1687,27 @@ class ChargingStationController:
             else:
                 logger.info("Different idToken without matching group — tx continues")
             return
+        # TC_C_32_CS: Authorization Cache + LocalPreAuthorize. When both are
+        # enabled and we have a non-expired cached Accepted entry for this
+        # idToken, skip AuthorizeRequest entirely and act on the cached info.
+        cache_enabled = self._get_bool("AuthCacheCtrlr", "Enabled", True)
+        pre_auth      = self._get_bool("AuthCtrlr", "LocalPreAuthorize", False)
+        cached_info   = self._lookup_auth_cache(raw_uid) if (cache_enabled and pre_auth) else None
         try:
-            res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
-            id_token_info = (res or {}).get("idTokenInfo", {}) or {}
-            status = id_token_info.get("status")
+            if cached_info is not None:
+                logger.info(f"Authorization cache hit for {raw_uid} — skipping AuthorizeRequest")
+                id_token_info = cached_info
+                status = id_token_info.get("status")
+            else:
+                res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
+                id_token_info = (res or {}).get("idTokenInfo", {}) or {}
+                status = id_token_info.get("status")
+                if status == "Accepted" and cache_enabled:
+                    self._auth_cache[raw_uid] = {
+                        "idTokenInfo": id_token_info,
+                        "stored_at": time.time(),
+                    }
+                    save_auth_cache(self._auth_cache)
             group_id = (id_token_info.get("groupIdToken") or {}).get("idToken")
             if status == "Accepted":
                 if not self.transaction_id:
@@ -1718,6 +1754,37 @@ class ChargingStationController:
                     self._meter_task = None
         except Exception as e:
             logger.error(f"Authorisation call failed: {e}")
+
+    def _lookup_auth_cache(self, raw_uid: str) -> Optional[Dict[str, Any]]:
+        """Return a non-expired cached idTokenInfo for raw_uid, or None.
+
+        Expiry is enforced by AuthCacheCtrlr.LifeTime (seconds since stored_at)
+        AND by idTokenInfo.cacheExpiryDateTime if the CSMS provided one. If the
+        entry is expired, it's evicted.
+        """
+        entry = self._auth_cache.get(raw_uid)
+        if not entry:
+            return None
+        info = entry.get("idTokenInfo") or {}
+        if info.get("status") != "Accepted":
+            return None
+        lifetime = self._get_int("AuthCacheCtrlr", "LifeTime", 86400)
+        stored_at = entry.get("stored_at", 0)
+        if lifetime > 0 and (time.time() - stored_at) > lifetime:
+            self._auth_cache.pop(raw_uid, None)
+            save_auth_cache(self._auth_cache)
+            return None
+        expiry_iso = info.get("cacheExpiryDateTime")
+        if expiry_iso:
+            try:
+                expiry_dt = datetime.fromisoformat(expiry_iso.replace("Z", "+00:00"))
+                if datetime.now(timezone.utc) > expiry_dt:
+                    self._auth_cache.pop(raw_uid, None)
+                    save_auth_cache(self._auth_cache)
+                    return None
+            except Exception:
+                pass
+        return info
 
     async def _send_tx_updated(
         self,

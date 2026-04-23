@@ -5,14 +5,17 @@ __pycache__/
 venv/
 env/
 .pytest_cache/
+cp_sim201.service
 
 # Project related docs and output (Excluding from repo)
+design_guide/
 ocpp201_std_doc/
 output_docs/
 outputs/
 tmp_*
 test_out.txt
 parsed_docs.md
+CODING_GUIDELINES.md
 .gemini/
 .claude/
 

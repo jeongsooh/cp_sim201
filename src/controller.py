@@ -25,13 +25,32 @@ logger = logging.getLogger(__name__)
 # attributeValue whose format doesn't match the declared type (TC_B_11_CS).
 # Variables not listed default to "string" (accept any).
 _VAR_DATA_TYPES: Dict[tuple, str] = {
-    ("EVSE", "Power"): "integer",
+    ("EVSE", "Power"): "decimal",
+    ("EVSE", "Available"): "boolean",
+    ("EVSE", "AvailabilityState"): "OptionList",
+    ("EVSE", "SupplyPhases"): "integer",
+    ("Connector", "Available"): "boolean",
+    ("Connector", "AvailabilityState"): "OptionList",
+    ("Connector", "SupplyPhases"): "integer",
+    ("ChargingStation", "AvailabilityState"): "OptionList",
+    ("ChargingStation", "Available"): "boolean",
+    ("ChargingStation", "SupplyPhases"): "integer",
     ("TokenReader", "Enabled"): "boolean",
-    ("SampledDataCtrlr", "SampledDataTxUpdatedInterval"): "integer",
-    ("AlignedDataCtrlr", "AlignedDataInterval"): "integer",
+    ("SampledDataCtrlr", "TxUpdatedInterval"): "integer",
+    ("SampledDataCtrlr", "TxEndedInterval"): "integer",
+    ("SampledDataCtrlr", "TxUpdatedMeasurands"): "MemberList",
+    ("SampledDataCtrlr", "TxStartedMeasurands"): "MemberList",
+    ("SampledDataCtrlr", "TxEndedMeasurands"): "MemberList",
+    ("AlignedDataCtrlr", "Interval"): "integer",
+    ("AlignedDataCtrlr", "TxEndedInterval"): "integer",
+    ("AlignedDataCtrlr", "Measurands"): "MemberList",
+    ("AlignedDataCtrlr", "TxEndedMeasurands"): "MemberList",
     ("HeartbeatCtrlr", "HeartbeatInterval"): "integer",
     ("TxCtrlr", "StopTxOnEVSideDisconnect"): "boolean",
+    ("TxCtrlr", "StopTxOnInvalidId"): "boolean",
     ("TxCtrlr", "EVConnectionTimeOut"): "integer",
+    ("TxCtrlr", "TxStartPoint"): "MemberList",
+    ("TxCtrlr", "TxStopPoint"): "MemberList",
     ("AuthCtrlr", "AuthorizeRemoteStart"): "boolean",
     ("AuthCtrlr", "LocalAuthorizeOffline"): "boolean",
     ("AuthCtrlr", "LocalPreAuthorize"): "boolean",
@@ -41,14 +60,30 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("OCPPCommCtrlr", "OfflineThreshold"): "integer",
     ("OCPPCommCtrlr", "NetworkProfileConnectionAttempts"): "integer",
     ("OCPPCommCtrlr", "ActiveNetworkProfile"): "integer",
+    ("OCPPCommCtrlr", "NetworkConfigurationPriority"): "SequenceList",
     ("OCPPCommCtrlr", "QueueAllMessages"): "boolean",
     ("OCPPCommCtrlr", "RetryBackOffWaitMinimum"): "integer",
     ("OCPPCommCtrlr", "RetryBackOffRepeatTimes"): "integer",
     ("OCPPCommCtrlr", "RetryBackOffRandomRange"): "integer",
     ("OCPPCommCtrlr", "MessageTimeout"): "integer",
+    ("OCPPCommCtrlr", "ResetRetries"): "integer",
+    ("OCPPCommCtrlr", "UnlockOnEVSideDisconnect"): "boolean",
+    ("OCPPCommCtrlr", "WebSocketPingInterval"): "integer",
+    ("OCPPCommCtrlr", "FileTransferProtocols"): "MemberList",
+    ("ClockCtrlr", "DateTime"): "dateTime",
+    ("ClockCtrlr", "TimeSource"): "MemberList",
+    ("DeviceDataCtrlr", "BytesPerMessage"): "integer",
+    ("DeviceDataCtrlr", "ItemsPerMessage"): "integer",
     ("LocalAuthListCtrlr", "Enabled"): "boolean",
     ("LocalAuthListCtrlr", "Entries"): "integer",
+    ("LocalAuthListCtrlr", "BytesPerMessage"): "integer",
+    ("LocalAuthListCtrlr", "ItemsPerMessage"): "integer",
     ("SmartChargingCtrlr", "Enabled"): "boolean",
+    ("SmartChargingCtrlr", "Entries"): "integer",
+    ("SmartChargingCtrlr", "LimitChangeSignificance"): "decimal",
+    ("SmartChargingCtrlr", "PeriodsPerSchedule"): "integer",
+    ("SmartChargingCtrlr", "ProfileStackLevel"): "integer",
+    ("SmartChargingCtrlr", "RateUnit"): "MemberList",
     ("ReservationCtrlr", "Enabled"): "boolean",
     ("SecurityCtrlr", "SecurityProfile"): "integer",
     ("SecurityCtrlr", "AllowCSMSTLSWildcards"): "boolean",
@@ -56,6 +91,40 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("SecurityCtrlr", "CertSigningWaitMinimum"): "integer",
     ("SecurityCtrlr", "CertSigningRepeatTimes"): "integer",
 }
+
+# OCPP 2.0.1 VariableCharacteristics: optional unit string for select variables
+# so NotifyReport carries the spec-mandated unit (e.g. seconds, watts).
+_VAR_UNITS: Dict[tuple, str] = {
+    ("EVSE", "Power"): "W",
+    ("OCPPCommCtrlr", "OfflineThreshold"): "s",
+    ("OCPPCommCtrlr", "MessageTimeout"): "s",
+    ("OCPPCommCtrlr", "MessageAttemptInterval"): "s",
+    ("OCPPCommCtrlr", "RetryBackOffWaitMinimum"): "s",
+    ("OCPPCommCtrlr", "WebSocketPingInterval"): "s",
+    ("TxCtrlr", "EVConnectionTimeOut"): "s",
+    ("HeartbeatCtrlr", "HeartbeatInterval"): "s",
+    ("AlignedDataCtrlr", "Interval"): "s",
+    ("AlignedDataCtrlr", "TxEndedInterval"): "s",
+    ("SampledDataCtrlr", "TxUpdatedInterval"): "s",
+    ("SampledDataCtrlr", "TxEndedInterval"): "s",
+    ("SecurityCtrlr", "CertSigningWaitMinimum"): "s",
+}
+
+# Instanced device-model entries (OCPP 2.0.1 VariableType.instance) that can't
+# live in the single-key-per-variable dict. Each tuple is (component, variable,
+# instance, value, mutability). Emitted alongside device_model in NotifyReport.
+_INSTANCED_ENTRIES = [
+    ("OCPPCommCtrlr", "MessageTimeout", "Default", "30", "ReadOnly"),
+    ("OCPPCommCtrlr", "MessageAttempts", "TransactionEvent", "3", "ReadWrite"),
+    ("OCPPCommCtrlr", "MessageAttemptInterval", "TransactionEvent", "30", "ReadWrite"),
+    ("DeviceDataCtrlr", "BytesPerMessage", "GetReport", "65000", "ReadOnly"),
+    ("DeviceDataCtrlr", "BytesPerMessage", "GetVariables", "65000", "ReadOnly"),
+    ("DeviceDataCtrlr", "BytesPerMessage", "SetVariables", "65000", "ReadOnly"),
+    ("DeviceDataCtrlr", "ItemsPerMessage", "GetReport", "64", "ReadOnly"),
+    ("DeviceDataCtrlr", "ItemsPerMessage", "GetVariables", "64", "ReadOnly"),
+    ("DeviceDataCtrlr", "ItemsPerMessage", "SetVariables", "64", "ReadOnly"),
+    ("SmartChargingCtrlr", "Entries", "ChargingProfiles", "10", "ReadOnly"),
+]
 
 
 def _value_matches_data_type(value: str, data_type: str) -> bool:
@@ -171,34 +240,51 @@ class ChargingStationController:
         # Block B: 장치 모델 (component → variable → (value, mutability))
         self.device_model = load_device_model({
             "ChargingStation": {
-                "Model":           ("AC_SIMULATOR_201", "ReadOnly"),
-                "VendorName":      ("TEST_CORP",        "ReadOnly"),
-                "FirmwareVersion": ("1.0.0",            "ReadWrite"),
-                "SerialNumber":    ("SN-001",           "ReadOnly"),
+                "Model":             ("AC_SIMULATOR_201", "ReadOnly"),
+                "VendorName":        ("TEST_CORP",        "ReadOnly"),
+                "FirmwareVersion":   ("1.0.0",            "ReadWrite"),
+                "SerialNumber":      ("SN-001",           "ReadOnly"),
+                "AvailabilityState": ("Available",        "ReadOnly"),
+                "Available":         ("true",             "ReadOnly"),
+                "SupplyPhases":      ("3",                "ReadOnly"),
             },
             "EVSE": {
-                "AvailabilityState": ("Available", "ReadWrite"),
+                "AvailabilityState": ("Available", "ReadOnly"),
+                "Available":         ("true",      "ReadOnly"),
                 "Power":             ("7400",      "ReadOnly"),
+                "SupplyPhases":      ("3",         "ReadOnly"),
             },
             "Connector": {
-                "AvailabilityState": ("Available", "ReadWrite"),
+                "AvailabilityState": ("Available", "ReadOnly"),
+                "Available":         ("true",      "ReadOnly"),
                 "ConnectorType":     ("cType2",    "ReadOnly"),
+                "SupplyPhases":      ("3",         "ReadOnly"),
             },
             "TokenReader": {
                 "Enabled": ("true", "ReadWrite"),
             },
-            # CSMS 설정 가능 파라미터
+            "ClockCtrlr": {
+                "DateTime":   (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "ReadOnly"),
+                "TimeSource": ("Heartbeat", "ReadWrite"),
+            },
+            "DeviceDataCtrlr": {
+                # Per-RPC-type instances live in _INSTANCED_ENTRIES; this
+                # component entry exists so the report has the parent node.
+            },
+            # CSMS 설정 가능 파라미터 — names are the canonical OCPP 2.0.1 ones
+            # (no SampledData*/AlignedData* prefixes; those were from earlier drafts).
             "SampledDataCtrlr": {
-                "SampledDataTxUpdatedInterval":   ("60",    "ReadWrite"),
-                "SampledDataTxUpdatedMeasurands": ("Current.Import,Voltage,Energy.Active.Import.Register", "ReadWrite"),
-                "SampledDataTxStartedMeasurands": ("Energy.Active.Import.Register", "ReadWrite"),
-                "SampledDataTxEndedMeasurands":   ("Energy.Active.Import.Register", "ReadWrite"),
-                "SupportedMeasurands":            ("Energy.Active.Import.Register,Current.Import,Voltage,Power.Active.Import", "ReadOnly"),
+                "TxUpdatedInterval":   ("60",    "ReadWrite"),
+                "TxEndedInterval":     ("0",     "ReadWrite"),
+                "TxUpdatedMeasurands": ("Current.Import,Voltage,Energy.Active.Import.Register", "ReadWrite"),
+                "TxStartedMeasurands": ("Energy.Active.Import.Register", "ReadWrite"),
+                "TxEndedMeasurands":   ("Energy.Active.Import.Register", "ReadWrite"),
             },
             "AlignedDataCtrlr": {
-                "AlignedDataInterval":          ("0",                                  "ReadWrite"),
-                "AlignedDataMeasurands":        ("Energy.Active.Import.Register",      "ReadWrite"),
-                "AlignedDataTxEndedMeasurands": ("Energy.Active.Import.Register",      "ReadWrite"),
+                "Interval":          ("0",                              "ReadWrite"),
+                "TxEndedInterval":   ("0",                              "ReadWrite"),
+                "Measurands":        ("Energy.Active.Import.Register",  "ReadWrite"),
+                "TxEndedMeasurands": ("Energy.Active.Import.Register",  "ReadWrite"),
             },
             "HeartbeatCtrlr": {
                 "HeartbeatInterval": ("60", "ReadWrite"),
@@ -207,6 +293,7 @@ class ChargingStationController:
                 "TxStartPoint":             ("Authorized,EVConnected", "ReadWrite"),
                 "TxStopPoint":              ("Authorized,EVConnected", "ReadWrite"),
                 "StopTxOnEVSideDisconnect": ("true", "ReadWrite"),
+                "StopTxOnInvalidId":        ("true", "ReadWrite"),
                 "EVConnectionTimeOut":      ("60",   "ReadWrite"),
             },
             "AuthCtrlr": {
@@ -226,20 +313,29 @@ class ChargingStationController:
                 "RetryBackOffWaitMinimum":          ("2",    "ReadWrite"),
                 "RetryBackOffRepeatTimes":          ("10",   "ReadWrite"),
                 "RetryBackOffRandomRange":          ("3",    "ReadWrite"),
-                "MessageTimeout":                   ("30",   "ReadOnly"),
+                "ResetRetries":                     ("3",    "ReadWrite"),
+                "UnlockOnEVSideDisconnect":         ("true", "ReadWrite"),
+                "WebSocketPingInterval":            ("0",    "ReadWrite"),
+                "FileTransferProtocols":            ("HTTP,HTTPS", "ReadOnly"),
             },
             "LocalAuthListCtrlr": {
-                "Enabled": ("true", "ReadWrite"),
-                "Entries": ("100",  "ReadOnly"),
+                "Enabled":        ("true", "ReadWrite"),
+                "Entries":        ("100",  "ReadOnly"),
+                "BytesPerMessage":("65000","ReadOnly"),
+                "ItemsPerMessage":("20",   "ReadOnly"),
             },
             "SmartChargingCtrlr": {
-                "Enabled": ("false", "ReadWrite"),
+                "Enabled":                 ("false", "ReadWrite"),
+                "LimitChangeSignificance": ("1.0",   "ReadWrite"),
+                "PeriodsPerSchedule":      ("10",    "ReadOnly"),
+                "ProfileStackLevel":       ("10",    "ReadOnly"),
+                "RateUnit":                ("A,W",   "ReadOnly"),
             },
             "ReservationCtrlr": {
                 "Enabled": ("true", "ReadWrite"),
             },
             "SecurityCtrlr": {
-                "SecurityProfile":        (str(security_profile), "ReadWrite"),
+                "SecurityProfile":        (str(security_profile), "ReadOnly"),
                 "AllowCSMSTLSWildcards":  ("false", "ReadWrite"),
                 "OrganizationName":       ("TEST_CORP", "ReadWrite"),
                 "CertificateEntries":     ("2",   "ReadOnly"),
@@ -249,8 +345,10 @@ class ChargingStationController:
                 "CertSigningRepeatTimes": ("3",  "ReadWrite"),
             },
         })
-        # Force-override SecurityProfile after load_device_model so persisted "0" can't win
-        self.device_model["SecurityCtrlr"]["SecurityProfile"] = (str(security_profile), "ReadWrite")
+        # Force-override SecurityProfile after load_device_model so persisted "0" can't win.
+        # Mutability stays ReadOnly per OCPP 2.0.1 — SecurityProfile is changed via
+        # the SetNetworkProfile + Reset flow, not directly via SetVariables.
+        self.device_model["SecurityCtrlr"]["SecurityProfile"] = (str(security_profile), "ReadOnly")
 
         # Block B — Core / Provisioning
         self.ocpp_client.register_action_handler("Reset",         self.handle_reset_request)
@@ -904,24 +1002,40 @@ class ChargingStationController:
     async def _send_notify_report(self, request_id: int) -> None:
         """Sends NotifyReport with full device model.
 
-        TC_B_12_CS: every reportData entry must include variableCharacteristics
-        (at minimum dataType + supportsMonitoring). dataType comes from the
-        _VAR_DATA_TYPES map; variables not in the map are reported as "string".
+        TC_B_12_CS / TC_B_53_CS: every reportData entry must carry
+        variableCharacteristics (dataType + supportsMonitoring at minimum;
+        unit where OCPP 2.0.1 specifies one). Variables that have multiple
+        instances (e.g. DeviceDataCtrlr.BytesPerMessage per-RPC) come from
+        _INSTANCED_ENTRIES because the dict can only hold one value per key.
         """
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         report_data = []
+
+        def _entry(comp, var, instance, value, mutability):
+            data_type = _VAR_DATA_TYPES.get((comp, var), "string")
+            characteristics: Dict[str, Any] = {
+                "dataType": data_type,
+                "supportsMonitoring": False,
+            }
+            unit = _VAR_UNITS.get((comp, var))
+            if unit:
+                characteristics["unit"] = unit
+            variable: Dict[str, Any] = {"name": var}
+            if instance is not None:
+                variable["instance"] = instance
+            return {
+                "component": {"name": comp},
+                "variable": variable,
+                "variableAttribute": [{"type": "Actual", "value": value, "mutability": mutability}],
+                "variableCharacteristics": characteristics,
+            }
+
         for comp_name, variables in self.device_model.items():
             for var_name, (value, mutability) in variables.items():
-                data_type = _VAR_DATA_TYPES.get((comp_name, var_name), "string")
-                report_data.append({
-                    "component": {"name": comp_name},
-                    "variable": {"name": var_name},
-                    "variableAttribute": [{"type": "Actual", "value": value, "mutability": mutability}],
-                    "variableCharacteristics": {
-                        "dataType": data_type,
-                        "supportsMonitoring": False,
-                    },
-                })
+                report_data.append(_entry(comp_name, var_name, None, value, mutability))
+
+        for comp, var, instance, value, mutability in _INSTANCED_ENTRIES:
+            report_data.append(_entry(comp, var, instance, value, mutability))
         try:
             await self.ocpp_client.call("NotifyReport", {
                 "requestId": request_id,
@@ -1050,10 +1164,10 @@ class ChargingStationController:
                 # Cannot change immediately while charging; will apply after transaction ends
                 return {"status": "Scheduled"}
             self.is_evse_available = False
-            self.device_model["EVSE"]["AvailabilityState"] = ("Inoperative", "ReadWrite")
+            self.device_model["EVSE"]["AvailabilityState"] = ("Inoperative", "ReadOnly")
         else:
             self.is_evse_available = True
-            self.device_model["EVSE"]["AvailabilityState"] = ("Available", "ReadWrite")
+            self.device_model["EVSE"]["AvailabilityState"] = ("Available", "ReadOnly")
         save_device_model(self.device_model)
         asyncio.create_task(self.connector_hal.on_status_change(force=True))
         return {"status": "Accepted"}
@@ -1344,7 +1458,7 @@ class ChargingStationController:
         self._tx_seq_no = 0
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         measurands = self._get_param(
-            "SampledDataCtrlr", "SampledDataTxStartedMeasurands",
+            "SampledDataCtrlr", "TxStartedMeasurands",
             "Energy.Active.Import.Register",
         )
         meter_data = self.power_contactor_hal.read_meter_values()
@@ -1401,7 +1515,7 @@ class ChargingStationController:
     async def _meter_values_loop(self, transaction_id: str) -> None:
         """TC_J_02_CS: Periodically reports TransactionEvent(Updated) with MeterValues"""
         while self.transaction_id == transaction_id:
-            interval = self._get_int("SampledDataCtrlr", "SampledDataTxUpdatedInterval", 60)
+            interval = self._get_int("SampledDataCtrlr", "TxUpdatedInterval", 60)
             await asyncio.sleep(interval)
 
             meter_data = self.power_contactor_hal.read_meter_values()
@@ -1410,7 +1524,7 @@ class ChargingStationController:
 
             now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             self._tx_seq_no += 1
-            measurands = self._get_param("SampledDataCtrlr", "SampledDataTxUpdatedMeasurands",
+            measurands = self._get_param("SampledDataCtrlr", "TxUpdatedMeasurands",
                                          "Energy.Active.Import.Register")
             payload = {
                 "eventType": "Updated",
@@ -1443,7 +1557,7 @@ class ChargingStationController:
                 self._tx_seq_no = 0
                 now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 meter_data = self.power_contactor_hal.read_meter_values()
-                measurands = self._get_param("SampledDataCtrlr", "SampledDataTxStartedMeasurands",
+                measurands = self._get_param("SampledDataCtrlr", "TxStartedMeasurands",
                                              "Energy.Active.Import.Register")
                 payload = {
                     "eventType": "Started",
@@ -1519,7 +1633,7 @@ class ChargingStationController:
             trigger_reason = trigger_reason_map.get(stopped_reason, "StopAuthorized")
 
             meter_data = self.power_contactor_hal.read_meter_values()
-            measurands = self._get_param("SampledDataCtrlr", "SampledDataTxEndedMeasurands",
+            measurands = self._get_param("SampledDataCtrlr", "TxEndedMeasurands",
                                          "Energy.Active.Import.Register")
             payload = {
                 "eventType": "Ended",
@@ -1546,7 +1660,7 @@ class ChargingStationController:
 
             # Re-apply availability if it was scheduled as Inoperative
             if not self.is_evse_available:
-                self.device_model["EVSE"]["AvailabilityState"] = ("Inoperative", "ReadWrite")
+                self.device_model["EVSE"]["AvailabilityState"] = ("Inoperative", "ReadOnly")
 
     # ------------------------------------------------------------------
     # Block A — Security and Certificates (TC_A_*)

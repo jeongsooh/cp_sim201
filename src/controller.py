@@ -1786,6 +1786,30 @@ class ChargingStationController:
                 pass
         return info
 
+    def _update_cache_from_tx_response(
+        self,
+        response: Optional[Dict[str, Any]],
+        raw_uid: Optional[str],
+    ) -> Optional[str]:
+        """C10_FR_05: update AuthCache with idTokenInfo from TransactionEventResponse.
+
+        Returns idTokenInfo.status if present so the caller can decide whether
+        to act on a deauthorization (Invalid / Blocked / Expired / Unknown).
+        """
+        if not response or not raw_uid:
+            return None
+        info = response.get("idTokenInfo") or {}
+        status = info.get("status")
+        if not status:
+            return None
+        if self._get_bool("AuthCacheCtrlr", "Enabled", True):
+            self._auth_cache[raw_uid] = {
+                "idTokenInfo": info,
+                "stored_at": time.time(),
+            }
+            save_auth_cache(self._auth_cache)
+        return status
+
     async def _send_tx_updated(
         self,
         trigger_reason: str,
@@ -1822,14 +1846,32 @@ class ChargingStationController:
         }
         if id_token is not None:
             payload["idToken"] = id_token
+        res: Optional[Dict[str, Any]] = None
         try:
-            await self.ocpp_client.call("TransactionEvent", payload)
+            res = await self.ocpp_client.call("TransactionEvent", payload)
         except Exception as e:
             logger.error(f"Failed to send Updated TransactionEvent ({trigger_reason}): {e}")
         else:
             # Reserve the seqNo only on successful send so a cancelled send
             # doesn't leave a hole in the transaction event sequence.
             self._tx_seq_no = next_seq_no
+        # C10_FR_05: only Updated events carrying an idToken (e.g. Authorized /
+        # StopAuthorized trigger reasons) receive an idTokenInfo back. Update
+        # cache + deauth-stop when CSMS rejects.
+        if id_token is not None:
+            raw_uid = id_token.get("idToken")
+            status = self._update_cache_from_tx_response(res, raw_uid)
+            if (
+                status
+                and status != "Accepted"
+                and self.transaction_id
+                and self._get_bool("TxCtrlr", "StopTxOnInvalidId", True)
+            ):
+                logger.info(
+                    f"TransactionEvent(Updated,{trigger_reason}) → "
+                    f"idTokenInfo.status={status} — stopping tx"
+                )
+                await self.stop_transaction("DeAuthorized", id_token=id_token)
 
     async def simulate_cable_plugged(self) -> None:
         logger.info("Cable plugged in. Connector Occupied.")
@@ -1911,10 +1953,27 @@ class ChargingStationController:
             }],
         }
         try:
-            await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
+            res = await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
             logger.info(f"Transaction started (Authorized): {self.transaction_id}")
         except Exception as e:
             logger.error(f"Failed to send Started TransactionEvent (Authorized): {e}")
+            res = None
+        # TC_C_34_CS (C10_FR_05 / C12.FR.06): CSMS may reject the token on the
+        # Started response. Update cache and, if StopTxOnInvalidId=true, stop
+        # the freshly-started tx with triggerReason=Deauthorized.
+        status = self._update_cache_from_tx_response(res, self._tx_id_token_value)
+        if (
+            status
+            and status != "Accepted"
+            and self.transaction_id
+            and self._get_bool("TxCtrlr", "StopTxOnInvalidId", True)
+        ):
+            logger.info(
+                f"TransactionEvent(Started) → idTokenInfo.status={status} — "
+                f"stopping tx (StopTxOnInvalidId)"
+            )
+            await self.stop_transaction("DeAuthorized", id_token=id_token)
+            return
         if not self._meter_task or self._meter_task.done():
             self._meter_task = asyncio.create_task(
                 self._meter_values_loop(self.transaction_id)
@@ -2164,7 +2223,11 @@ class ChargingStationController:
             # the stop was triggered by a scan.
             if id_token is not None:
                 payload["idToken"] = id_token
-            await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
+            res = await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
+            # C10_FR_05: keep cache in sync with idTokenInfo from the Ended
+            # response too (e.g. CSMS rolls validity forward on stop).
+            if id_token is not None:
+                self._update_cache_from_tx_response(res, id_token.get("idToken"))
             self.transaction_id = None
             self.is_authorized = False
             self._state_c_active = False

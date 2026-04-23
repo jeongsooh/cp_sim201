@@ -511,6 +511,13 @@ class ChargingStationController:
         self.ocpp_client.set_connection_failure_handler(
             self._on_connection_failure
         )
+        # TC_C_16_CS: when offline-queued TransactionEvents are replayed on
+        # reconnect, feed the response back through the same cache/deauth
+        # handler a live call uses. Without this, an Invalid idTokenInfo on
+        # a replayed Updated(Authorized) would be silently dropped instead of
+        # triggering a stop with triggerReason=Deauthorized.
+        if hasattr(self.ocpp_client, "set_replay_response_hook"):
+            self.ocpp_client.set_replay_response_hook(self._on_replay_response)
         # Snapshot the boot-time connection so we can fall back to it when
         # the priority list ends on a slot (typically "0") that was never
         # persisted to network_profiles.json. Guarded for unit tests that
@@ -1841,6 +1848,38 @@ class ChargingStationController:
             save_auth_cache(self._auth_cache)
         return status
 
+    async def _on_replay_response(
+        self,
+        action: str,
+        payload: Dict[str, Any],
+        response: Dict[str, Any],
+    ) -> None:
+        """TC_C_16_CS: handle responses to offline-queued replays.
+
+        For TransactionEvent replays carrying an idToken, mirror the same
+        deauth logic a live call would: update cache, and if the CSMS rejects
+        the token with StopTxOnInvalidId=true, stop the tx with
+        triggerReason=Deauthorized.
+        """
+        if action != "TransactionEvent":
+            return
+        id_token = payload.get("idToken") or {}
+        raw_uid = id_token.get("idToken")
+        if not raw_uid:
+            return
+        status = self._update_cache_from_tx_response(response, raw_uid)
+        if (
+            status
+            and status != "Accepted"
+            and self.transaction_id
+            and self._get_bool("TxCtrlr", "StopTxOnInvalidId", True)
+        ):
+            logger.info(
+                f"Replayed TransactionEvent → idTokenInfo.status={status} — "
+                f"stopping tx (Deauthorized)"
+            )
+            await self.stop_transaction("DeAuthorized", id_token=id_token)
+
     async def _send_tx_updated(
         self,
         trigger_reason: str,
@@ -1879,7 +1918,13 @@ class ChargingStationController:
             payload["idToken"] = id_token
         res: Optional[Dict[str, Any]] = None
         try:
-            res = await self.ocpp_client.call("TransactionEvent", payload)
+            # allow_offline=True: TC_C_16_CS exercises the offline auth path —
+            # user scans during a WS outage, cache grants local pre-auth, and
+            # the Updated(Authorized) event must persist through reconnect so
+            # CSMS can re-validate (possibly rejecting → Deauthorized stop).
+            res = await self.ocpp_client.call(
+                "TransactionEvent", payload, allow_offline=True,
+            )
         except Exception as e:
             logger.error(f"Failed to send Updated TransactionEvent ({trigger_reason}): {e}")
         else:

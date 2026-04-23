@@ -65,6 +65,19 @@ class OCPPClient:
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
+        # TC_C_16_CS: when drained offline messages get a response, route it
+        # back to the controller so per-action post-processing (e.g.
+        # TransactionEvent idTokenInfo → deauth-stop / cache update) runs just
+        # as it would on a live call.
+        self._replay_response_hook: Optional[
+            Callable[[str, Dict[str, Any], Dict[str, Any]], Awaitable[None]]
+        ] = None
+
+    def set_replay_response_hook(
+        self,
+        hook: Callable[[str, Dict[str, Any], Dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        self._replay_response_hook = hook
 
     def _load_schemas(self) -> Dict[str, dict]:
         schema_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schemas")
@@ -217,8 +230,18 @@ class OCPPClient:
         logger.info(f"[OfflineQueue] Replaying {len(entries)} queued messages")
         for entry in entries:
             try:
-                await self.call(entry["action"], entry["payload"])
+                response = await self.call(entry["action"], entry["payload"])
                 logger.info(f"[OfflineQueue] Replayed: {entry['action']}")
+                if self._replay_response_hook is not None:
+                    try:
+                        await self._replay_response_hook(
+                            entry["action"], entry["payload"], response or {},
+                        )
+                    except Exception as hook_err:
+                        logger.error(
+                            f"[OfflineQueue] Replay hook for {entry['action']} "
+                            f"failed: {hook_err}"
+                        )
             except Exception as e:
                 logger.error(f"[OfflineQueue] Failed to replay {entry['action']}: {e}")
 

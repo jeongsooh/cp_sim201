@@ -2080,14 +2080,25 @@ class ChargingStationController:
             )
 
     def _schedule_ev_connect_timeout(self) -> None:
-        """TC_E_05_CS: arm (or re-arm) the EV cable-plug watchdog."""
+        """TC_E_05_CS: arm (or re-arm) the EV cable-plug watchdog.
+
+        The watchdog is deadline-based on the event loop clock: the arm time
+        is stamped immediately, and when the coroutine finally gets CPU we
+        sleep only for the remaining slice. Without this, a blocking
+        synchronous call (STM32 SPI meter read, ws.send TLS handshake) after
+        create_task() would push the 60s countdown start-time out — OCTT
+        measured 66s instead of 60s because the coroutine didn't actually
+        begin its sleep until 6s after arm.
+        """
         self._cancel_ev_connect_timeout()
         timeout_s = self._get_int("TxCtrlr", "EVConnectionTimeOut", 60)
         if timeout_s <= 0:
             return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
         logger.info(f"EVConnectionTimeOut watchdog armed ({timeout_s}s)")
         self._ev_connect_timeout_task = asyncio.create_task(
-            self._ev_connect_timeout_watchdog(timeout_s)
+            self._ev_connect_timeout_watchdog(deadline)
         )
 
     def _cancel_ev_connect_timeout(self) -> None:
@@ -2095,23 +2106,23 @@ class ChargingStationController:
             self._ev_connect_timeout_task.cancel()
         self._ev_connect_timeout_task = None
 
-    async def _ev_connect_timeout_watchdog(self, timeout_s: int) -> None:
+    async def _ev_connect_timeout_watchdog(self, deadline: float) -> None:
         """TC_E_05_CS E03.FR.05: fire TransactionEvent with triggerReason
         EVConnectTimeout when the cable doesn't arrive in time.
 
-        Per §E03: if TxStopPoint contains Authorized the tx ends
-        (eventType=Ended, stoppedReason=Timeout); otherwise the tx stays
-        alive but we deauthorize and emit an Updated event.
+        `deadline` is an event-loop monotonic timestamp set at arm time.
         """
         try:
-            await asyncio.sleep(timeout_s)
+            loop = asyncio.get_running_loop()
+            remaining = deadline - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
         except asyncio.CancelledError:
             return
         if self.connector_hal.status == "Occupied" or not self.transaction_id:
             return
         logger.warning(
-            f"EVConnectionTimeOut ({timeout_s}s) expired — deauthorizing tx "
-            f"{self.transaction_id}"
+            f"EVConnectionTimeOut expired — deauthorizing tx {self.transaction_id}"
         )
         tx_stop_points = [
             p.strip()

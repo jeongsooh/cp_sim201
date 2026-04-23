@@ -234,6 +234,10 @@ class ChargingStationController:
 
         self._heartbeat_task = None
         self._meter_task = None
+        # TC_E_05_CS: watchdog task for TxCtrlr.EVConnectionTimeOut — starts
+        # when the user authorizes before the cable is plugged, fires if the
+        # cable doesn't arrive in time and deauthorizes the session.
+        self._ev_connect_timeout_task: Optional[asyncio.Task] = None
         self._pending_reset: bool = False
         self._pending_reset_type: str = "Immediate"
         # Whether the Reset was answered with "Scheduled" (only true when
@@ -1970,6 +1974,9 @@ class ChargingStationController:
     async def simulate_cable_plugged(self) -> None:
         logger.info("Cable plugged in. Connector Occupied.")
         self.connector_hal.status = "Occupied"
+        # TC_E_05_CS: cable arrived within the EVConnectionTimeOut window —
+        # cancel the deauthorization watchdog.
+        self._cancel_ev_connect_timeout()
         payload = {
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "connectorStatus": "Occupied",
@@ -2064,6 +2071,60 @@ class ChargingStationController:
             self._meter_task = asyncio.create_task(
                 self._meter_values_loop(self.transaction_id)
             )
+        # TC_E_05_CS: authorization happened before the cable was connected;
+        # arm the watchdog. If the EV isn't plugged in within
+        # TxCtrlr.EVConnectionTimeOut seconds we must deauthorize the tx.
+        if self.connector_hal.status != "Occupied":
+            self._schedule_ev_connect_timeout()
+
+    def _schedule_ev_connect_timeout(self) -> None:
+        """TC_E_05_CS: arm (or re-arm) the EV cable-plug watchdog."""
+        self._cancel_ev_connect_timeout()
+        timeout_s = self._get_int("TxCtrlr", "EVConnectionTimeOut", 60)
+        if timeout_s <= 0:
+            return
+        logger.info(f"EVConnectionTimeOut watchdog armed ({timeout_s}s)")
+        self._ev_connect_timeout_task = asyncio.create_task(
+            self._ev_connect_timeout_watchdog(timeout_s)
+        )
+
+    def _cancel_ev_connect_timeout(self) -> None:
+        if self._ev_connect_timeout_task and not self._ev_connect_timeout_task.done():
+            self._ev_connect_timeout_task.cancel()
+        self._ev_connect_timeout_task = None
+
+    async def _ev_connect_timeout_watchdog(self, timeout_s: int) -> None:
+        """TC_E_05_CS E03.FR.05: fire TransactionEvent with triggerReason
+        EVConnectTimeout when the cable doesn't arrive in time.
+
+        Per §E03: if TxStopPoint contains Authorized the tx ends
+        (eventType=Ended, stoppedReason=Timeout); otherwise the tx stays
+        alive but we deauthorize and emit an Updated event.
+        """
+        try:
+            await asyncio.sleep(timeout_s)
+        except asyncio.CancelledError:
+            return
+        if self.connector_hal.status == "Occupied" or not self.transaction_id:
+            return
+        logger.warning(
+            f"EVConnectionTimeOut ({timeout_s}s) expired — deauthorizing tx "
+            f"{self.transaction_id}"
+        )
+        tx_stop_points = [
+            p.strip()
+            for p in self._get_param("TxCtrlr", "TxStopPoint", "").split(",")
+            if p.strip()
+        ]
+        if "Authorized" in tx_stop_points:
+            # stop_transaction maps "Timeout" → triggerReason "EVConnectTimeout"
+            # and uses "Timeout" as stoppedReason.
+            await self.stop_transaction("Timeout", id_token=None)
+        else:
+            self.is_authorized = False
+            self._tx_id_token_value = None
+            self._tx_group_id_token_value = None
+            await self._send_tx_updated("EVConnectTimeout", id_token=None)
 
     async def _start_tx_on_ev_connected(self) -> None:
         """Start a transaction triggered by cable plug-in.
@@ -2305,6 +2366,9 @@ class ChargingStationController:
                 # TC_B_22_CS: Reset(Immediate) ends the tx with stoppedReason
                 # "ImmediateReset" but triggerReason "ResetCommand" (per spec).
                 "ImmediateReset":  "ResetCommand",
+                # TC_E_05_CS: EVConnectionTimeOut expired without cable plug —
+                # stoppedReason=Timeout, triggerReason=EVConnectTimeout.
+                "Timeout":         "EVConnectTimeout",
             }
             trigger_reason = trigger_reason_map.get(stopped_reason, "StopAuthorized")
 
@@ -2350,6 +2414,9 @@ class ChargingStationController:
             self._state_c_active = False
             self._tx_id_token_value = None
             self._tx_group_id_token_value = None
+            # TC_E_05_CS: tx is over (for any reason) — cancel the
+            # EVConnectionTimeOut watchdog if it's still armed.
+            self._cancel_ev_connect_timeout()
 
             # Re-apply availability if it was scheduled as Inoperative
             if not self.is_evse_available:

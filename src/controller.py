@@ -870,7 +870,8 @@ class ChargingStationController:
     async def _apply_active_network_profile(self) -> None:
         """NetworkConfigurationPriority의 첫 번째 슬롯을 활성 프로파일로 채택한다.
 
-        슬롯 데이터가 저장되어 있지 않으면 (slot 0이면서 파일 미존재 등) 현재 설정을 유지한다.
+        이미 해당 슬롯으로 연결 중이면 (또는 슬롯 데이터가 없으면) 현재 설정을 그대로 유지한다.
+        저장된 프로파일이 BasicAuth 자격을 포함하지 않아 Authorization 헤더가 사라지는 것을 방지.
         SecurityProfile / ActiveNetworkProfile device_model 값도 함께 갱신한다.
         """
         priority = self._get_param("OCPPCommCtrlr", "NetworkConfigurationPriority", "0")
@@ -878,6 +879,17 @@ class ChargingStationController:
             active_slot = int(priority.split(",")[0].strip())
         except (ValueError, IndexError):
             logger.warning(f"Invalid NetworkConfigurationPriority value: {priority}")
+            return
+
+        current_slot = self._get_param("OCPPCommCtrlr", "ActiveNetworkProfile", "0")
+        if current_slot.strip() == str(active_slot):
+            # TC_B_20_CS: a plain Reset (no preceding SetNetworkProfile) must
+            # keep the live ws_kwargs. Re-running build_ws_kwargs_from_profile
+            # on a slot whose stored data lacks basicAuth would drop the
+            # Authorization header and earn a 401 on reconnect.
+            logger.info(
+                f"Active slot unchanged ({active_slot}) — keeping current connection settings"
+            )
             return
 
         profiles = load_network_profiles()

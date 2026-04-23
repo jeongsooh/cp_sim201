@@ -714,13 +714,26 @@ class ChargingStationController:
         )
 
     async def handle_get_variables(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_B_06_CS: Returns device model variable values"""
+        """TC_B_06_CS / TC_B_32_CS: Returns device model variable values.
+
+        Per OCPP 2.0.1 GetVariableStatusEnumType, UnknownComponent and
+        UnknownVariable are distinct: the former when the component name
+        isn't part of the device model at all, the latter when the component
+        exists but the variable under it doesn't.
+        """
         results = []
         for item in payload["getVariableData"]:
             comp = item["component"]["name"]
             var  = item["variable"]["name"]
             attr = item.get("attributeType", "Actual")
-            comp_data = self.device_model.get(comp, {})
+            if comp not in self.device_model:
+                results.append({
+                    "attributeStatus": "UnknownComponent",
+                    "component": item["component"],
+                    "variable": item["variable"],
+                })
+                continue
+            comp_data = self.device_model[comp]
             if var in comp_data:
                 val, _ = comp_data[var]
                 results.append({
@@ -740,27 +753,35 @@ class ChargingStationController:
         return {"getVariableResult": results}
 
     async def handle_set_variables(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_B_07_CS: Updates device model variable values"""
+        """TC_B_07_CS: Updates device model variable values.
+
+        SetVariableStatusEnumType distinguishes UnknownComponent (component not
+        in device model) from UnknownVariable (variable not under an existing
+        component) — same rule as GetVariables.
+        """
         results = []
         for item in payload["setVariableData"]:
             comp = item["component"]["name"]
             var  = item["variable"]["name"]
             val  = item["attributeValue"]
-            comp_data = self.device_model.get(comp, {})
-            if var in comp_data:
-                _, mutability = comp_data[var]
-                if mutability == "ReadOnly":
-                    status = "ReadOnly"
-                else:
-                    rejection = self._validate_variable_value(comp, var, val)
-                    if rejection:
-                        status = rejection
-                    else:
-                        self.device_model[comp][var] = (val, mutability)
-                        self._apply_variable_change(comp, var, val)
-                        status = "Accepted"
+            if comp not in self.device_model:
+                status = "UnknownComponent"
             else:
-                status = "UnknownVariable"
+                comp_data = self.device_model[comp]
+                if var in comp_data:
+                    _, mutability = comp_data[var]
+                    if mutability == "ReadOnly":
+                        status = "ReadOnly"
+                    else:
+                        rejection = self._validate_variable_value(comp, var, val)
+                        if rejection:
+                            status = rejection
+                        else:
+                            self.device_model[comp][var] = (val, mutability)
+                            self._apply_variable_change(comp, var, val)
+                            status = "Accepted"
+                else:
+                    status = "UnknownVariable"
             results.append({
                 "attributeStatus": status,
                 "component": item["component"],

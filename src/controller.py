@@ -1303,7 +1303,14 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_clear_cache(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_C_05_CS: Clears local authorization cache"""
+        """TC_C_05_CS / TC_C_38_CS: Clears local authorization cache.
+
+        Per §C14, if AuthCacheCtrlr.Enabled is false the CS must reject
+        ClearCacheRequest — the cache feature isn't available to clear.
+        """
+        if not self._get_bool("AuthCacheCtrlr", "Enabled", True):
+            logger.info("ClearCache received but AuthCacheCtrlr.Enabled=false — Rejected")
+            return {"status": "Rejected"}
         self._auth_cache = {}
         save_auth_cache(self._auth_cache)
         logger.info("ClearCache received — cache cleared")

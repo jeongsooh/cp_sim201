@@ -984,6 +984,21 @@ class ChargingStationController:
         ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
             profile, self._cert_dir, self._ca_cert
         )
+        # TC_B_45_CS: SetNetworkProfile often omits basicAuth when switching to
+        # another slot on the same CSMS root — the station is expected to
+        # carry over its existing credentials. Inherit the Authorization
+        # header from the current ws_kwargs if the new profile didn't supply
+        # one (and the new security profile actually uses Basic Auth).
+        new_sp_int = int(profile.get("securityProfile", 0))
+        if (
+            new_sp_int in (1, 2)
+            and "additional_headers" not in ws_kwargs
+            and "additional_headers" in self.ocpp_client._ws_kwargs
+        ):
+            ws_kwargs["additional_headers"] = self.ocpp_client._ws_kwargs["additional_headers"]
+            logger.info(
+                "Inherited Authorization header from current connection for new slot"
+            )
         self.ocpp_client.update_connection(new_url, ws_kwargs)
 
         new_sp = str(int(profile.get("securityProfile", 0)))

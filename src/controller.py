@@ -742,9 +742,20 @@ class ChargingStationController:
         """연결 성립 시 호출. 최초 부팅 또는 Reset 후에만 BootNotification 전송."""
         try:
             if self._pending_reset:
+                # OCPP 2.0.1 BootReasonEnumType: OnIdle was answered with
+                # "Scheduled" earlier, so boot reason must be ScheduledReset;
+                # Immediate resets keep reason=RemoteReset (TC_B_21_CS).
+                boot_reason = (
+                    "ScheduledReset" if self._pending_reset_type == "OnIdle"
+                    else "RemoteReset"
+                )
                 self._pending_reset = False
                 self._first_connect = False
-                await self.boot_routine(reason="RemoteReset")
+                await self.boot_routine(reason=boot_reason)
+                # TC_B_21_CS step 11: after a post-Reset boot, the CS must
+                # send a SecurityEventNotificationRequest of type
+                # StartupOfTheDevice or ResetOrReboot.
+                await self._send_security_event_notification("ResetOrReboot")
                 # [OCPP 2.0.1 TC_A_19_CS / Part 2 §A08] 보안 프로파일 업그레이드 후
                 # priority에서 하위 보안 slot을 제거해 downgrade 차단
                 self._prune_network_priority_after_upgrade()

@@ -896,15 +896,25 @@ class ChargingStationController:
         return {"status": "Accepted"}
 
     async def _send_notify_report(self, request_id: int) -> None:
-        """Sends NotifyReport with full device model"""
+        """Sends NotifyReport with full device model.
+
+        TC_B_12_CS: every reportData entry must include variableCharacteristics
+        (at minimum dataType + supportsMonitoring). dataType comes from the
+        _VAR_DATA_TYPES map; variables not in the map are reported as "string".
+        """
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         report_data = []
         for comp_name, variables in self.device_model.items():
             for var_name, (value, mutability) in variables.items():
+                data_type = _VAR_DATA_TYPES.get((comp_name, var_name), "string")
                 report_data.append({
                     "component": {"name": comp_name},
                     "variable": {"name": var_name},
                     "variableAttribute": [{"type": "Actual", "value": value, "mutability": mutability}],
+                    "variableCharacteristics": {
+                        "dataType": data_type,
+                        "supportsMonitoring": False,
+                    },
                 })
         try:
             await self.ocpp_client.call("NotifyReport", {

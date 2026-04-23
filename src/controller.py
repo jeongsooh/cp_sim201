@@ -209,6 +209,10 @@ class ChargingStationController:
         self.power_contactor_hal = PowerContactorHAL(self.evse_id, self.ocpp_client)
 
         self.is_authorized: bool = False
+        # TC_C_04_CS: remember the idToken that authorized the live tx so a
+        # subsequent scan with a DIFFERENT idToken does not stop the
+        # transaction (per OCPP 2.0.1 §C01.FR.03).
+        self._tx_id_token_value: Optional[str] = None
         self.transaction_id: str | None = None
         self.meter_value: float = 0.0
         self._state_c_active: bool = False
@@ -1619,13 +1623,26 @@ class ChargingStationController:
         # RFID reader is a keycode string as far as OCPP is concerned. Keep
         # type as "KeyCode" so the authorize payload matches OCTT expectations.
         id_token = {"idToken": raw_uid, "type": "KeyCode"}
-        # TC_B_21_CS: a second scan while an authorized transaction is live
-        # stops the transaction locally. Per OCPP 2.0.1 §C03 the CS does NOT
-        # re-issue AuthorizeRequest for a stop-scan of the same token — it
-        # just closes out the transaction.
+        # TC_B_21_CS / TC_C_04_CS: handling a second scan while an authorized
+        # transaction is live depends on whether the new idToken matches the
+        # one that started the transaction.
+        #   - Same idToken → local stop (no AuthorizeRequest per §C03).
+        #   - Different idToken → send Authorize; the response may come back
+        #     Accepted, but the transaction MUST NOT be stopped and no
+        #     TransactionEventRequest may follow (§C01.FR.03).
         if self.transaction_id and self.is_authorized:
-            logger.info("Stop-scan while authorized tx active — stopping transaction")
-            await self.stop_transaction("Local")
+            if raw_uid == self._tx_id_token_value:
+                logger.info("Stop-scan (same idToken) — stopping transaction")
+                await self.stop_transaction("Local")
+                return
+            logger.info(
+                "Scan during active tx with DIFFERENT idToken — Authorize only, "
+                "tx continues"
+            )
+            try:
+                await self.ocpp_client.call("Authorize", {"idToken": id_token})
+            except Exception as e:
+                logger.error(f"Authorize (different-token scan) failed: {e}")
             return
         try:
             res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
@@ -1633,6 +1650,7 @@ class ChargingStationController:
             if status == "Accepted":
                 if not self.transaction_id:
                     self.is_authorized = True
+                    self._tx_id_token_value = raw_uid
                     # OCPP 2.0.1 §E02 TxStartPoint OR semantics: if "Authorized"
                     # is in the list, authorization alone starts the
                     # transaction even without the cable connected
@@ -1654,6 +1672,7 @@ class ChargingStationController:
                     # (is_authorized must be False here — the authorized+active
                     # case was handled by the early return above.)
                     self.is_authorized = True
+                    self._tx_id_token_value = raw_uid
                     self.power_contactor_hal.control_relay("Close")
                     await self._send_tx_updated("Authorized", id_token=id_token)
             else:
@@ -2031,6 +2050,7 @@ class ChargingStationController:
             self.transaction_id = None
             self.is_authorized = False
             self._state_c_active = False
+            self._tx_id_token_value = None
 
             # Re-apply availability if it was scheduled as Inoperative
             if not self.is_evse_available:

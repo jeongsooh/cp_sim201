@@ -480,10 +480,73 @@ class ChargingStationController:
         # TC_B_51_CS: reconnect backoff must honour the OCPPCommCtrlr variables
         # the CSMS sets at runtime (e.g. RetryBackOffWaitMinimum=64).
         self.ocpp_client.set_retry_config_provider(self._retry_backoff_config)
+        # TC_B_46_CS: after NetworkProfileConnectionAttempts failed attempts on
+        # the current slot, fall back to the next slot in
+        # NetworkConfigurationPriority.
+        self.ocpp_client.set_connection_failure_handler(
+            self._on_connection_failure
+        )
 
     # ------------------------------------------------------------------
     # Boot-state SecurityError gate (OCPP 2.0.1 §B02/B03)
     # ------------------------------------------------------------------
+
+    def _on_connection_failure(self, consecutive_failures: int) -> None:
+        """TC_B_46_CS: fall back to the next priority slot after N failures.
+
+        Reads OCPPCommCtrlr.NetworkProfileConnectionAttempts; when the current
+        slot has failed that many times in a row, advances ActiveNetworkProfile
+        to the next entry in NetworkConfigurationPriority and rebuilds
+        ws_kwargs from that slot's stored connectionData. update_connection()
+        resets the client's failure counter so the new slot gets a fresh
+        budget.
+        """
+        limit = self._get_int("OCPPCommCtrlr", "NetworkProfileConnectionAttempts", 3)
+        if consecutive_failures < limit:
+            return
+        priority_str = self._get_param("OCPPCommCtrlr", "NetworkConfigurationPriority", "")
+        slots = [s.strip() for s in priority_str.split(",") if s.strip()]
+        if len(slots) <= 1:
+            return
+        current_slot = self._get_param("OCPPCommCtrlr", "ActiveNetworkProfile", "").strip()
+        try:
+            idx = slots.index(current_slot)
+        except ValueError:
+            idx = 0
+        next_idx = idx + 1
+        if next_idx >= len(slots):
+            logger.warning(
+                f"All {len(slots)} priority slots exhausted; continuing to retry current"
+            )
+            return
+        next_slot = slots[next_idx]
+        logger.info(
+            f"Fallback: slot {current_slot} failed {consecutive_failures}x "
+            f"(>= {limit}) — switching to slot {next_slot}"
+        )
+        profiles = load_network_profiles()
+        profile = profiles.get(next_slot)
+        if not profile:
+            logger.warning(f"No stored profile for fallback slot {next_slot}; keeping current")
+            return
+        new_url = profile.get("ocppCsmsUrl", "")
+        if not new_url:
+            logger.warning(f"Fallback slot {next_slot} missing ocppCsmsUrl; keeping current")
+            return
+        ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
+            profile, self._cert_dir, self._ca_cert
+        )
+        new_sp_int = int(profile.get("securityProfile", 0))
+        if (
+            new_sp_int in (1, 2)
+            and "additional_headers" not in ws_kwargs
+            and "additional_headers" in self.ocpp_client._ws_kwargs
+        ):
+            ws_kwargs["additional_headers"] = self.ocpp_client._ws_kwargs["additional_headers"]
+        self.ocpp_client.update_connection(new_url, ws_kwargs)
+        self.device_model["SecurityCtrlr"]["SecurityProfile"] = (str(new_sp_int), "ReadOnly")
+        self.device_model["OCPPCommCtrlr"]["ActiveNetworkProfile"] = (next_slot, "ReadOnly")
+        save_device_model(self.device_model)
 
     def _retry_backoff_config(self):
         """Return (wait_min_s, random_range_s, repeat_times) from device model.

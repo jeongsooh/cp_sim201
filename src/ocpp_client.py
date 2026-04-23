@@ -56,6 +56,12 @@ class OCPPClient:
         # CSMS may change at runtime. Without a provider, the static
         # OCPPConfig defaults are used.
         self._retry_config_provider: Optional[Callable[[], Tuple[int, int, int]]] = None
+        # TC_B_46_CS: after N consecutive failed connection attempts on the
+        # current slot, let the controller advance to the next slot in
+        # NetworkConfigurationPriority. Handler is invoked with the running
+        # failure count; it may call update_connection() to swap ws_kwargs.
+        self._connection_failure_handler: Optional[Callable[[int], None]] = None
+        self._consecutive_failures: int = 0
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -108,6 +114,9 @@ class OCPPClient:
         self.server_url = server_url if server_url.endswith("/") else server_url + "/"
         self.uri = f"{self.server_url}{self.station_id}"
         self._ws_kwargs = ws_kwargs
+        # New slot starts with a fresh attempt count so the fallback threshold
+        # applies per-slot (TC_B_46_CS).
+        self._consecutive_failures = 0
         logger.info(f"Connection settings updated — next reconnect will use {self.uri}")
 
     def register_on_connect(self, callback: Callable[[], Awaitable[None]]) -> None:
@@ -122,6 +131,11 @@ class OCPPClient:
         self, provider: Optional[Callable[[], Tuple[int, int, int]]]
     ) -> None:
         self._retry_config_provider = provider
+
+    def set_connection_failure_handler(
+        self, handler: Optional[Callable[[int], None]]
+    ) -> None:
+        self._connection_failure_handler = handler
 
     def _retry_config(self) -> Tuple[int, int, int]:
         if self._retry_config_provider is not None:
@@ -148,6 +162,7 @@ class OCPPClient:
                 )
                 logger.info("Connection established.")
                 attempt = 0
+                self._consecutive_failures = 0
                 if self._on_connect_callback:
                     asyncio.create_task(self._on_connect_callback())
                 # G4: 재연결 직후 오프라인 큐 재전송
@@ -172,6 +187,18 @@ class OCPPClient:
                 self._cleanup_pending_calls()
                 if not self._is_running:
                     break
+                self._consecutive_failures += 1
+                # TC_B_46_CS: give the controller a chance to swap to the
+                # next priority slot after its per-slot failure budget is
+                # exhausted. The handler may call update_connection(), which
+                # resets _consecutive_failures and attempt for the new slot.
+                if self._connection_failure_handler is not None:
+                    try:
+                        self._connection_failure_handler(self._consecutive_failures)
+                    except Exception as ex:
+                        logger.warning(f"connection_failure_handler raised: {ex}")
+                    if self._consecutive_failures == 0:
+                        attempt = 0
                 wait_min, random_range, repeat_times = self._retry_config()
                 step = min(attempt, repeat_times)
                 wait_time = (

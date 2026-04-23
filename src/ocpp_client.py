@@ -197,6 +197,10 @@ class OCPPClient:
                     f"Connection error (cert_error={is_cert_error}, "
                     f"type={type(e).__name__}): {e_str[:300]}"
                 )
+                # TC_C_16_CS: drop the dead socket reference so concurrent
+                # call() paths take the offline-queue branch instead of
+                # trying to send on a half-closed ws and losing the event.
+                self.ws = None
                 self._cleanup_pending_calls()
                 if not self._is_running:
                     break
@@ -404,7 +408,25 @@ class OCPPClient:
             try:
                 raw_msg = json.dumps(call_msg)
                 logger.info(f"WS SEND: msgId={msg_id} action={action} payload={raw_msg[:200]}")
-                await self.ws.send(raw_msg)
+                try:
+                    await self.ws.send(raw_msg)
+                except (ConnectionClosed, OSError) as send_err:
+                    # TC_C_16_CS: the listener may not have set self.ws=None
+                    # yet when a close frame races with our send. Treat this
+                    # as offline and queue if the caller permitted it.
+                    logger.warning(
+                        f"WS send failed ({type(send_err).__name__}); "
+                        f"ws appeared alive but is closed"
+                    )
+                    self.ws = None
+                    self._pending_calls.pop(msg_id, None)
+                    self._pending_actions.pop(msg_id, None)
+                    if allow_offline:
+                        if action == "TransactionEvent":
+                            payload = {**payload, "offline": True}
+                        await self.offline_queue.enqueue(action, payload)
+                        return {}
+                    raise ConnectionError(f"Not connected to CSMS: {send_err}")
                 return await asyncio.wait_for(future, timeout=timeout)
             except asyncio.TimeoutError:
                 # OCPP 2.0.1 §4.1: only one outstanding CALL is allowed per

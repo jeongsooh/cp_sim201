@@ -795,11 +795,17 @@ class ChargingStationController:
                         self.device_model[comp][var] = (val, mutability)
                         self._apply_variable_change(comp, var, val)
                         status = "Accepted"
-            results.append({
+            result = {
                 "attributeStatus": status,
                 "component": item["component"],
                 "variable": item["variable"],
-            })
+            }
+            # TC_B_37_CS: echo attributeType back when the CSMS specified one
+            # (e.g. NotSupportedAttributeType responses must carry the Target
+            # type the request asked for).
+            if "attributeType" in item:
+                result["attributeType"] = item["attributeType"]
+            results.append(result)
         save_device_model(self.device_model)
         logger.info(f"SetVariables: processed {len(results)} variables")
         return {"setVariableResult": results}

@@ -71,7 +71,7 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("OCPPCommCtrlr", "WebSocketPingInterval"): "integer",
     ("OCPPCommCtrlr", "FileTransferProtocols"): "MemberList",
     ("ClockCtrlr", "DateTime"): "dateTime",
-    ("ClockCtrlr", "TimeSource"): "MemberList",
+    ("ClockCtrlr", "TimeSource"): "SequenceList",
     ("DeviceDataCtrlr", "BytesPerMessage"): "integer",
     ("DeviceDataCtrlr", "ItemsPerMessage"): "integer",
     ("LocalAuthListCtrlr", "Enabled"): "boolean",
@@ -90,6 +90,32 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("SecurityCtrlr", "CertificateEntries"): "integer",
     ("SecurityCtrlr", "CertSigningWaitMinimum"): "integer",
     ("SecurityCtrlr", "CertSigningRepeatTimes"): "integer",
+}
+
+# OCPP 2.0.1 VariableCharacteristics.valuesList — required for OptionList /
+# MemberList / SequenceList variables. Values taken from the OCPP 2.0.1
+# Appendix enum tables.
+_VAR_VALUES_LIST: Dict[tuple, str] = {
+    ("ChargingStation", "AvailabilityState"): "Available,Occupied,Reserved,Unavailable,Faulted",
+    ("EVSE", "AvailabilityState"): "Available,Occupied,Reserved,Unavailable,Faulted",
+    ("Connector", "AvailabilityState"): "Available,Occupied,Reserved,Unavailable,Faulted",
+    ("ClockCtrlr", "TimeSource"): "Heartbeat,NTP,RealTimeClock,MobileNetwork,RadioTimeTransmitter,GPS",
+    ("TxCtrlr", "TxStartPoint"): "ParkingBayOccupancy,EVConnected,Authorized,DataSigned,PowerPathClosed,EnergyTransfer",
+    ("TxCtrlr", "TxStopPoint"): "ParkingBayOccupancy,EVConnected,Authorized,DataSigned,PowerPathClosed,EnergyTransfer",
+    ("SampledDataCtrlr", "TxUpdatedMeasurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
+    ("SampledDataCtrlr", "TxStartedMeasurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
+    ("SampledDataCtrlr", "TxEndedMeasurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
+    ("AlignedDataCtrlr", "Measurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
+    ("AlignedDataCtrlr", "TxEndedMeasurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
+    ("SmartChargingCtrlr", "RateUnit"): "A,W",
+    ("OCPPCommCtrlr", "FileTransferProtocols"): "FTP,FTPS,HTTP,HTTPS",
+    ("OCPPCommCtrlr", "NetworkConfigurationPriority"): "0,1,2,3",
+}
+
+# Optional maxLimit — required by OCTT for EVSE.Power (spec makes it optional,
+# but the template treats maxLimit as required-present).
+_VAR_MAX_LIMIT: Dict[tuple, float] = {
+    ("EVSE", "Power"): 22000.0,
 }
 
 # OCPP 2.0.1 VariableCharacteristics: optional unit string for select variables
@@ -1020,6 +1046,12 @@ class ChargingStationController:
             unit = _VAR_UNITS.get((comp, var))
             if unit:
                 characteristics["unit"] = unit
+            values_list = _VAR_VALUES_LIST.get((comp, var))
+            if values_list is not None:
+                characteristics["valuesList"] = values_list
+            max_limit = _VAR_MAX_LIMIT.get((comp, var))
+            if max_limit is not None:
+                characteristics["maxLimit"] = max_limit
             variable: Dict[str, Any] = {"name": var}
             if instance is not None:
                 variable["instance"] = instance

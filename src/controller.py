@@ -1448,10 +1448,27 @@ class ChargingStationController:
         except Exception as e:
             logger.error(f"Authorisation call failed: {e}")
 
-    async def _send_tx_updated(self, trigger_reason: str, id_token: Optional[Dict[str, Any]] = None) -> None:
-        """Send TransactionEvent(Updated) on an already-started transaction."""
+    async def _send_tx_updated(
+        self,
+        trigger_reason: str,
+        id_token: Optional[Dict[str, Any]] = None,
+        charging_state: Optional[str] = None,
+    ) -> None:
+        """Send TransactionEvent(Updated) on an already-started transaction.
+
+        chargingState (EVConnected / SuspendedEVSE / SuspendedEV / Charging) is
+        mandatory on Updated events for several trigger reasons (TC_B_21_CS —
+        CablePluggedIn). Derived from live state if the caller didn't specify.
+        """
         if not self.transaction_id:
             return
+        if charging_state is None:
+            if self._state_c_active:
+                charging_state = "Charging"
+            elif self.connector_hal.status == "Occupied":
+                charging_state = "EVConnected"
+            else:
+                charging_state = "Idle"
         self._tx_seq_no += 1
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         payload: Dict[str, Any] = {
@@ -1460,7 +1477,10 @@ class ChargingStationController:
             "triggerReason": trigger_reason,
             "seqNo": self._tx_seq_no,
             "evse": {"id": self.evse_id, "connectorId": self.connector_id},
-            "transactionInfo": {"transactionId": self.transaction_id},
+            "transactionInfo": {
+                "transactionId": self.transaction_id,
+                "chargingState": charging_state,
+            },
         }
         if id_token is not None:
             payload["idToken"] = id_token

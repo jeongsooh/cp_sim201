@@ -834,6 +834,14 @@ class ChargingStationController:
         """
         reset_type = payload.get("type", "Immediate")
         logger.info(f"Received ResetRequest: {reset_type}")
+        # TC_B_28_CS: we do not support per-EVSE reset — only whole-station.
+        # Per OCPP 2.0.1 B11.FR.09 / B12.FR.09, ResetRequest with an evseId
+        # must be answered Rejected.
+        if "evseId" in payload:
+            logger.warning(
+                f"Reset rejected: per-EVSE reset (evseId={payload['evseId']}) not supported"
+            )
+            return {"status": "Rejected"}
         self._pending_reset = True
         self._pending_reset_type = reset_type
         self._pending_reset_scheduled = False

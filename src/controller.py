@@ -486,6 +486,16 @@ class ChargingStationController:
         self.ocpp_client.set_connection_failure_handler(
             self._on_connection_failure
         )
+        # Snapshot the boot-time connection so we can fall back to it when
+        # the priority list ends on a slot (typically "0") that was never
+        # persisted to network_profiles.json. Guarded for unit tests that
+        # pass a mocked OCPPClient.
+        self._initial_server_url: str = getattr(self.ocpp_client, "server_url", "") or ""
+        _initial_kwargs = getattr(self.ocpp_client, "_ws_kwargs", None)
+        self._initial_ws_kwargs: Dict[str, Any] = dict(_initial_kwargs) if isinstance(_initial_kwargs, dict) else {}
+        self._initial_slot: str = self._get_param(
+            "OCPPCommCtrlr", "ActiveNetworkProfile", "0"
+        ).strip()
 
     # ------------------------------------------------------------------
     # Boot-state SecurityError gate (OCPP 2.0.1 §B02/B03)
@@ -527,6 +537,23 @@ class ChargingStationController:
         profiles = load_network_profiles()
         profile = profiles.get(next_slot)
         if not profile:
+            # TC_B_46_CS: slot 0 (or whichever slot the station booted on)
+            # isn't in network_profiles.json — use the snapshot of the
+            # original boot-time connection instead.
+            if next_slot == self._initial_slot:
+                logger.info(
+                    f"Falling back to initial boot slot {next_slot} "
+                    f"({self._initial_server_url})"
+                )
+                self.ocpp_client.update_connection(
+                    self._initial_server_url.rstrip("/"),
+                    dict(self._initial_ws_kwargs),
+                )
+                self.device_model["OCPPCommCtrlr"]["ActiveNetworkProfile"] = (
+                    next_slot, "ReadOnly"
+                )
+                save_device_model(self.device_model)
+                return
             logger.warning(f"No stored profile for fallback slot {next_slot}; keeping current")
             return
         new_url = profile.get("ocppCsmsUrl", "")

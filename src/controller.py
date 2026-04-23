@@ -1412,9 +1412,23 @@ class ChargingStationController:
             status = (res or {}).get("idTokenInfo", {}).get("status")
             if status == "Accepted":
                 if not self.transaction_id:
-                    # No tx yet (RFID before cable) — start via Authorize+EVConnect flow
                     self.is_authorized = True
-                    await self._try_start_transaction()
+                    # OCPP 2.0.1 §E02 TxStartPoint OR semantics: if "Authorized"
+                    # is in the list, authorization alone starts the
+                    # transaction even without the cable connected
+                    # (TC_B_21_CS). Otherwise fall back to the AND-style
+                    # _try_start_transaction which waits for cable plug.
+                    tx_start_points = [
+                        p.strip()
+                        for p in self._get_param("TxCtrlr", "TxStartPoint", "").split(",")
+                        if p.strip()
+                    ]
+                    if "Authorized" in tx_start_points:
+                        await self._start_tx_on_authorized(id_token)
+                        if self.connector_hal.status == "Occupied":
+                            self.power_contactor_hal.control_relay("Close")
+                    else:
+                        await self._try_start_transaction()
                 elif not self.is_authorized:
                     # tx started by EVConnected trigger; this scan authorizes it.
                     self.is_authorized = True
@@ -1479,13 +1493,70 @@ class ChargingStationController:
             for p in self._get_param("TxCtrlr", "TxStartPoint", "").split(",")
             if p.strip()
         ]
-        if "EVConnected" in tx_start_points and not self.transaction_id:
+        if self.transaction_id:
+            # Transaction already started (via Authorized trigger). Close the
+            # relay now that the cable is connected and notify CSMS.
+            if self.is_authorized:
+                self.power_contactor_hal.control_relay("Close")
+            await self._send_tx_updated("CablePluggedIn")
+        elif "EVConnected" in tx_start_points:
             await self._start_tx_on_ev_connected()
             # If already authorized (RFID scanned first), energize immediately.
             if self.is_authorized:
                 self.power_contactor_hal.control_relay("Close")
         else:
             await self._try_start_transaction()
+
+    async def _start_tx_on_authorized(self, id_token: Dict[str, Any]) -> None:
+        """Start a transaction triggered by authorization before cable plug.
+
+        [OCPP 2.0.1 §E02] TxStartPoint "Authorized" — emit TransactionEvent
+        with eventType=Started and triggerReason=Authorized when the user is
+        authorized, regardless of cable state. chargingState reflects whether
+        the EV is connected yet.
+        """
+        if self.transaction_id:
+            return
+        self.transaction_id = str(uuid.uuid4())
+        self.meter_value = 0.0
+        self._state_c_active = False
+        self._tx_seq_no = 0
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        measurands = self._get_param(
+            "SampledDataCtrlr", "TxStartedMeasurands",
+            "Energy.Active.Import.Register",
+        )
+        meter_data = self.power_contactor_hal.read_meter_values()
+        charging_state = (
+            "EVConnected" if self.connector_hal.status == "Occupied" else "Idle"
+        )
+        payload = {
+            "eventType": "Started",
+            "timestamp": now_iso,
+            "triggerReason": "Authorized",
+            "seqNo": self._tx_seq_no,
+            "evse": {"id": self.evse_id, "connectorId": self.connector_id},
+            "idToken": id_token,
+            "transactionInfo": {
+                "transactionId": self.transaction_id,
+                "chargingState": charging_state,
+            },
+            "meterValue": [{
+                "timestamp": now_iso,
+                "sampledValue": self._build_sampled_values(
+                    measurands, meter_data, "Transaction.Begin", 0,
+                ),
+            }],
+        }
+        try:
+            await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
+            logger.info(f"Transaction started (Authorized): {self.transaction_id}")
+        except Exception as e:
+            logger.error(f"Failed to send Started TransactionEvent (Authorized): {e}")
+        if not self._meter_task or self._meter_task.done():
+            self._meter_task = asyncio.create_task(
+                self._meter_values_loop(self.transaction_id)
+            )
 
     async def _start_tx_on_ev_connected(self) -> None:
         """Start a transaction triggered by cable plug-in.

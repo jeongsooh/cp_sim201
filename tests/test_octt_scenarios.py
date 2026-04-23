@@ -53,10 +53,16 @@ async def test_TC_E_01_CS_start_transaction(controller, mock_client):
             # Relay should be closed to supply AC Power
             mock_relay.assert_called_once_with(1)
             
-    # Verification of Transaction Started
+    # Verification of Transaction Started.
+    # TxStartPoint "Authorized,EVConnected" (OR semantics) means the RFID scan
+    # starts the transaction immediately with triggerReason=Authorized; the
+    # later cable plug emits an Updated event with triggerReason=CablePluggedIn.
     args_list = mock_client.call.call_args_list
     tx_events = [c for c in args_list if c[0][0] == "TransactionEvent"]
-    
-    assert len(tx_events) == 1, "Expected exactly 1 TransactionEvent"
-    assert tx_events[0][0][1]["eventType"] == "Started", "EventType must be Started"
+
+    assert len(tx_events) == 2, "Expected Started + Updated (cable plug) TransactionEvents"
+    assert tx_events[0][0][1]["eventType"] == "Started"
+    assert tx_events[0][0][1]["triggerReason"] == "Authorized"
+    assert tx_events[1][0][1]["eventType"] == "Updated"
+    assert tx_events[1][0][1]["triggerReason"] == "CablePluggedIn"
     assert controller.transaction_id is not None, "Controller must persist an active Transaction ID"

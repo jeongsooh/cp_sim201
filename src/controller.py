@@ -882,9 +882,15 @@ class ChargingStationController:
         return {"setVariableResult": results}
 
     async def handle_get_base_report(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_B_*: Responds Accepted and sends NotifyReport asynchronously"""
+        """TC_B_12/TC_B_15: GetBaseReport(ConfigurationInventory|FullInventory) emits
+        the full device-model report; SummaryInventory is not implemented and must
+        be answered with NotSupported per OCPP 2.0.1 GenericDeviceModelStatusEnumType.
+        """
         request_id = payload["requestId"]
-        logger.info(f"GetBaseReport requestId={request_id}, reportBase={payload.get('reportBase')}")
+        report_base = payload.get("reportBase")
+        logger.info(f"GetBaseReport requestId={request_id}, reportBase={report_base}")
+        if report_base not in ("ConfigurationInventory", "FullInventory"):
+            return {"status": "NotSupported"}
         asyncio.create_task(self._send_notify_report(request_id))
         return {"status": "Accepted"}
 

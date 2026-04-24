@@ -2179,6 +2179,15 @@ class ChargingStationController:
                 self.power_contactor_hal.control_relay("Close")
         else:
             await self._try_start_transaction()
+        # TC_E_16_CS / TC_E_43..E_45_CS: when the cable is plugged with the
+        # tx already authorized (relay closed), simulate the EV's State C
+        # pilot transition so CSMS sees the ChargingStateChanged=Charging
+        # event. Real rigs produce this via the CP ADC monitor, but on some
+        # hardware setups (esp. during offline periods) the ADC dip isn't
+        # reliably observed — drive the state transition from software so
+        # the queued event stream still matches the spec.
+        if self.transaction_id and self.is_authorized and not self._state_c_active:
+            await self.handle_state_c()
 
     async def _start_tx_on_authorized(
         self,

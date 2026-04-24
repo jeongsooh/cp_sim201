@@ -56,13 +56,18 @@ async def test_TC_E_01_CS_start_transaction(controller, mock_client):
     # Verification of Transaction Started.
     # TxStartPoint "Authorized,EVConnected" (OR semantics) means the RFID scan
     # starts the transaction immediately with triggerReason=Authorized; the
-    # later cable plug emits an Updated event with triggerReason=CablePluggedIn.
+    # later cable plug emits Updated(CablePluggedIn) and — because the cable
+    # plug with an authorized tx transitions the charging state — also
+    # Updated(ChargingStateChanged=Charging) (TC_E_16_CS auto-fire).
     args_list = mock_client.call.call_args_list
     tx_events = [c for c in args_list if c[0][0] == "TransactionEvent"]
 
-    assert len(tx_events) == 2, "Expected Started + Updated (cable plug) TransactionEvents"
+    assert len(tx_events) == 3, "Expected Started + CablePluggedIn + ChargingStateChanged TransactionEvents"
     assert tx_events[0][0][1]["eventType"] == "Started"
     assert tx_events[0][0][1]["triggerReason"] == "Authorized"
     assert tx_events[1][0][1]["eventType"] == "Updated"
     assert tx_events[1][0][1]["triggerReason"] == "CablePluggedIn"
+    assert tx_events[2][0][1]["eventType"] == "Updated"
+    assert tx_events[2][0][1]["triggerReason"] == "ChargingStateChanged"
+    assert tx_events[2][0][1]["transactionInfo"]["chargingState"] == "Charging"
     assert controller.transaction_id is not None, "Controller must persist an active Transaction ID"

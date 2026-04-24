@@ -1012,6 +1012,13 @@ class ChargingStationController:
                 self._pending_firmware_update_reboot = False
                 self._pending_firmware_update_request_id = None
                 self._first_connect = False
+                # TC_L_13_CS: after a firmware-update reboot the CSMS expects
+                # the connector to come back up as Available. If a tx ended
+                # via StopAuthorized with the cable still plugged, the HAL
+                # would otherwise still read Occupied post-reboot. Treat the
+                # reboot as a clean slate.
+                self.connector_hal.status = "Available"
+                self._cable_plug_event_sent = False
                 await self.boot_routine(reason="FirmwareUpdate")
                 if fw_request_id is not None:
                     try:

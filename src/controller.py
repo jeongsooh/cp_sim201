@@ -2815,18 +2815,16 @@ class ChargingStationController:
             # the stop was triggered by a scan.
             if id_token is not None:
                 payload["idToken"] = id_token
-            res = await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
-            # C10_FR_05: keep cache in sync with idTokenInfo from the Ended
-            # response too (e.g. CSMS rolls validity forward on stop).
-            if id_token is not None:
-                self._update_cache_from_tx_response(res, id_token.get("idToken"))
-            # TC_E_31_CS: remember this tx so GetTransactionStatus can still
-            # flag messagesInQueue=true after the tx has ended but replay is
-            # still pending. Cap the history to prevent unbounded growth.
-            if self.transaction_id:
-                self._ended_tx_ids.add(self.transaction_id)
-                if len(self._ended_tx_ids) > 32:
-                    self._ended_tx_ids.pop()
+            # TC_F_04_CS: clear the tx state BEFORE awaiting the Ended send.
+            # Without this, a CSMS RequestStartTransaction that arrives
+            # during the Ended roundtrip (e.g. right after an
+            # EVConnectTimeout-driven stop) sees transaction_id +
+            # is_authorized as still set and gets rejected. Snapshot the
+            # txId for cache updates / the ended-tx history.
+            ended_tx_id = self.transaction_id
+            self._ended_tx_ids.add(ended_tx_id)
+            if len(self._ended_tx_ids) > 32:
+                self._ended_tx_ids.pop()
             self.transaction_id = None
             self.is_authorized = False
             self._state_c_active = False
@@ -2835,6 +2833,11 @@ class ChargingStationController:
             # TC_E_05_CS: tx is over (for any reason) — cancel the
             # EVConnectionTimeOut watchdog if it's still armed.
             self._cancel_ev_connect_timeout()
+            res = await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
+            # C10_FR_05: keep cache in sync with idTokenInfo from the Ended
+            # response too (e.g. CSMS rolls validity forward on stop).
+            if id_token is not None:
+                self._update_cache_from_tx_response(res, id_token.get("idToken"))
 
             # Re-apply availability if it was scheduled as Inoperative
             if not self.is_evse_available:

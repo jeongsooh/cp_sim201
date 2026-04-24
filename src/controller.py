@@ -98,8 +98,8 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("SecurityCtrlr", "CertificateEntries"): "integer",
     ("SecurityCtrlr", "CertSigningWaitMinimum"): "integer",
     ("SecurityCtrlr", "CertSigningRepeatTimes"): "integer",
-    # TC_L_13_CS
-    ("FirmwareCtrlr", "AllowNewSessionsPendingFirmwareUpdate"): "boolean",
+    # TC_L_13_CS — OCPP 2.0.1 places this variable under ChargingStation.
+    ("ChargingStation", "AllowNewSessionsPendingFirmwareUpdate"): "boolean",
 }
 
 # OCPP 2.0.1 VariableCharacteristics.valuesList — required for OptionList /
@@ -366,6 +366,10 @@ class ChargingStationController:
                 "AvailabilityState": ("Available",        "ReadOnly"),
                 "Available":         ("true",             "ReadOnly"),
                 "SupplyPhases":      ("3",                "ReadOnly"),
+                # TC_L_13_CS / §L01.FR.06-07: when false, the CS must set all
+                # Available connectors to Unavailable for the duration of a
+                # pending firmware update and refuse new sessions.
+                "AllowNewSessionsPendingFirmwareUpdate": ("true", "ReadWrite"),
             },
             "EVSE": {
                 "AvailabilityState": ("Available", "ReadOnly"),
@@ -475,12 +479,6 @@ class ChargingStationController:
                 # TC_A_23_CS: SignCertificate → CertificateSigned 대기/재시도 정책
                 "CertSigningWaitMinimum": ("30", "ReadWrite"),
                 "CertSigningRepeatTimes": ("3",  "ReadWrite"),
-            },
-            # TC_L_13_CS / §L01.FR.06-07: when false, the CS must set all
-            # Available connectors to Unavailable for the duration of a
-            # pending firmware update and refuse new sessions.
-            "FirmwareCtrlr": {
-                "AllowNewSessionsPendingFirmwareUpdate": ("true", "ReadWrite"),
             },
         })
         # Force-override SecurityProfile after load_device_model so persisted "0" can't win.
@@ -2173,7 +2171,7 @@ class ChargingStationController:
                 else self._is_firmware_signature_invalid(signature)
             )
             allow_new_sessions = self._get_bool(
-                "FirmwareCtrlr", "AllowNewSessionsPendingFirmwareUpdate", True,
+                "ChargingStation", "AllowNewSessionsPendingFirmwareUpdate", True,
             )
             tx_active = bool(self.transaction_id)
 

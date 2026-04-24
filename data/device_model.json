@@ -1,6 +1,7 @@
 {
   "ChargingStation": {
-    "FirmwareVersion": "1.0.0"
+    "FirmwareVersion": "1.0.0",
+    "AllowNewSessionsPendingFirmwareUpdate": "true"
   },
   "TokenReader": {
     "Enabled": "true"
@@ -22,7 +23,7 @@
     "TxEndedMeasurands": "Energy.Active.Import.Register"
   },
   "HeartbeatCtrlr": {
-    "HeartbeatInterval": "1"
+    "HeartbeatInterval": "300"
   },
   "TxCtrlr": {
     "TxStartPoint": "Authorized,EVConnected",
@@ -71,8 +72,5 @@
     "OrganizationName": "TEST_CORP",
     "CertSigningWaitMinimum": "30",
     "CertSigningRepeatTimes": "3"
-  },
-  "FirmwareCtrlr": {
-    "AllowNewSessionsPendingFirmwareUpdate": "true"
   }
 }

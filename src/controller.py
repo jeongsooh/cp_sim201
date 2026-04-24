@@ -1891,15 +1891,35 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_update_firmware(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_K_01_CS: Accepts firmware update and simulates the update sequence"""
+        """TC_K_01_CS / TC_L_01_CS: Accepts firmware update and simulates the update sequence."""
         request_id = payload["requestId"]
-        location   = payload.get("firmware", {}).get("location", "unknown")
-        logger.info(f"UpdateFirmware requestId={request_id}, location={location}")
-        asyncio.create_task(self._simulate_firmware_update(request_id))
+        firmware = payload.get("firmware") or {}
+        location = firmware.get("location", "unknown")
+        # TC_L_01_CS: when the payload includes signature + signingCertificate,
+        # the CS must add "SignatureVerified" (or InvalidSignature on failure)
+        # to the status sequence between Downloaded and Installing.
+        is_secure = bool(firmware.get("signature")) and bool(
+            firmware.get("signingCertificate")
+        )
+        logger.info(
+            f"UpdateFirmware requestId={request_id}, location={location}, "
+            f"secure={is_secure}"
+        )
+        asyncio.create_task(
+            self._simulate_firmware_update(request_id, is_secure=is_secure)
+        )
         return {"status": "Accepted"}
 
-    async def _simulate_firmware_update(self, request_id: int) -> None:
-        for fw_status in ["Downloading", "Downloaded", "Installing", "Installed"]:
+    async def _simulate_firmware_update(
+        self, request_id: int, is_secure: bool = False,
+    ) -> None:
+        sequence = ["Downloading", "Downloaded"]
+        if is_secure:
+            # TC_L_01_CS: a verified signing certificate yields
+            # SignatureVerified before install proceeds.
+            sequence.append("SignatureVerified")
+        sequence.extend(["Installing", "Installed"])
+        for fw_status in sequence:
             await asyncio.sleep(2)
             try:
                 await self.ocpp_client.call("FirmwareStatusNotification",

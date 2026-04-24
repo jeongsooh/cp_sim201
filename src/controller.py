@@ -3586,17 +3586,64 @@ class ChargingStationController:
         await self.ocpp_client.call("Get15118EVCertificate", payload)
 
     @staticmethod
+    def _spki_bit_string_content(spki_der: bytes) -> bytes:
+        """Return the BIT STRING contents of a SubjectPublicKeyInfo DER
+        (stripped of the leading unused-bits byte), per RFC 6960 §4.1.1.
+
+        SPKI ::= SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING }
+        """
+        def _read_len(buf: bytes, i: int) -> tuple:
+            b = buf[i]
+            if b & 0x80:
+                n = b & 0x7F
+                return int.from_bytes(buf[i + 1:i + 1 + n], "big"), i + 1 + n
+            return b, i + 1
+
+        if spki_der[0] != 0x30:
+            raise ValueError("SPKI not SEQUENCE")
+        _, i = _read_len(spki_der, 1)
+        if spki_der[i] != 0x30:
+            raise ValueError("AlgorithmIdentifier not SEQUENCE")
+        alg_len, alg_body = _read_len(spki_der, i + 1)
+        i = alg_body + alg_len
+        if spki_der[i] != 0x03:
+            raise ValueError("subjectPublicKey not BIT STRING")
+        bs_len, bs_body = _read_len(spki_der, i + 1)
+        return spki_der[bs_body + 1:bs_body + bs_len]
+
+    @staticmethod
     def _make_cert_hash_data(pem: str) -> Dict[str, str]:
-        """PEM 문자열로부터 결정적 hash data를 생성한다.
-        issuerNameHash/issuerKeyHash는 PEM SHA-256 digest로 근사한다.
-        실제 X.509 파싱 없이 OCTT 포맷 요건(필드 존재·타입)을 충족한다."""
-        digest = hashlib.sha256(pem.encode()).hexdigest()  # 64 hex chars
-        return {
-            "hashAlgorithm": "SHA256",
-            "issuerNameHash": digest,
-            "issuerKeyHash":  digest,
-            "serialNumber":   digest[:16],  # 8-byte hex, maxLength 40 이내
-        }
+        """Compute RFC 6960 OCSP-style hash data for a certificate.
+
+        TC_M_12_CS: OCTT verifies issuerNameHash/issuerKeyHash/serialNumber
+        against values it derives from the installed cert, so these must be
+        real — hashing the PEM text yields garbage.
+        """
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives import serialization
+            cert = x509.load_pem_x509_certificate(pem.encode())
+            issuer_der = cert.issuer.public_bytes()
+            spki_der = cert.public_key().public_bytes(
+                encoding=serialization.Encoding.DER,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            key_content = ChargingStationController._spki_bit_string_content(spki_der)
+            return {
+                "hashAlgorithm": "SHA256",
+                "issuerNameHash": hashlib.sha256(issuer_der).hexdigest(),
+                "issuerKeyHash": hashlib.sha256(key_content).hexdigest(),
+                "serialNumber": format(cert.serial_number, "x")[:40],
+            }
+        except Exception as e:
+            logger.warning(f"_make_cert_hash_data: falling back to PEM digest ({e})")
+            digest = hashlib.sha256(pem.encode()).hexdigest()
+            return {
+                "hashAlgorithm": "SHA256",
+                "issuerNameHash": digest,
+                "issuerKeyHash":  digest,
+                "serialNumber":   digest[:16],
+            }
 
     @staticmethod
     def _validate_cert_pem(pem: str) -> Optional[str]:

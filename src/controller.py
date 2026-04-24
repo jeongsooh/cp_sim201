@@ -1851,11 +1851,18 @@ class ChargingStationController:
                 boundary_dt = datetime.fromtimestamp(
                     next_boundary, tz=timezone.utc,
                 )
-                await self.send_meter_values(
-                    transaction_id=self.transaction_id,
-                    context="Sample.Clock",
-                    timestamp=boundary_dt,
-                )
+                if self.transaction_id:
+                    # TC_J_02_CS: during a tx, clock-aligned samples travel
+                    # on TransactionEventRequest (triggerReason=MeterValueClock),
+                    # not MeterValuesRequest. The latter's schema forbids
+                    # transactionId so mixing them there would fail client
+                    # validation entirely (Step 3 in OCTT TC_J_02 spec).
+                    await self._send_tx_updated_metervalue(boundary_dt)
+                else:
+                    await self.send_meter_values(
+                        context="Sample.Clock",
+                        timestamp=boundary_dt,
+                    )
             except asyncio.CancelledError:
                 return
             except Exception as e:
@@ -2314,6 +2321,46 @@ class ChargingStationController:
             status = self._update_cache_from_tx_response(res, raw_uid)
             if status and status != "Accepted":
                 await self._handle_tx_auth_rejection(status, id_token)
+
+    async def _send_tx_updated_metervalue(self, boundary_dt: datetime) -> None:
+        """TC_J_02_CS: clock-aligned MeterValue during a tx.
+
+        Sends TransactionEvent(Updated, triggerReason=MeterValueClock) with
+        a sampledValue block stamped at the clock-aligned boundary time.
+        """
+        if not self.transaction_id:
+            return
+        next_seq_no = self._tx_seq_no + 1
+        ts_iso = boundary_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        measurands = self._get_param(
+            "AlignedDataCtrlr", "Measurands",
+            "Energy.Active.Import.Register",
+        )
+        meter_data = self.power_contactor_hal.read_meter_values()
+        payload: Dict[str, Any] = {
+            "eventType": "Updated",
+            "timestamp": ts_iso,
+            "triggerReason": "MeterValueClock",
+            "seqNo": next_seq_no,
+            "evse": {"id": self.evse_id, "connectorId": self.connector_id},
+            "transactionInfo": {
+                "transactionId": self.transaction_id,
+            },
+            "meterValue": [{
+                "timestamp": ts_iso,
+                "sampledValue": self._build_sampled_values(
+                    measurands, meter_data, "Sample.Clock", self.meter_value,
+                ),
+            }],
+        }
+        try:
+            await self.ocpp_client.call(
+                "TransactionEvent", payload, allow_offline=True,
+            )
+        except Exception as e:
+            logger.error(f"Aligned-clock TransactionEvent failed: {e}")
+        else:
+            self._tx_seq_no = next_seq_no
 
     async def simulate_cable_plugged(self) -> None:
         logger.info("Cable plugged in. Connector Occupied.")

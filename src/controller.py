@@ -1605,13 +1605,15 @@ class ChargingStationController:
         # TC_F_01_CS: tx was already started by cable-plug (CablePluggedIn
         # trigger, chargingState=EVConnected, waiting for auth). The
         # remote start authorizes the existing tx — close the relay and
-        # emit Updated(triggerReason=Authorized, idToken) — do NOT start
-        # a second tx.
+        # emit Updated(triggerReason=RemoteStart, idToken) — do NOT start
+        # a second tx. (Local-scan auth of an existing tx uses
+        # triggerReason=Authorized; remote-start must use RemoteStart per
+        # F01 validation.)
         if self.transaction_id:
             if self.connector_hal.status == "Occupied":
                 self.power_contactor_hal.control_relay("Close")
             await self._send_tx_updated(
-                "Authorized",
+                "RemoteStart",
                 id_token=id_token,
                 remote_start_id=remote_start_id,
             )

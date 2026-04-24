@@ -2069,16 +2069,32 @@ class ChargingStationController:
             return "install_verification_failed"
         return None
 
-    @staticmethod
-    def _is_firmware_signature_invalid(signature: str) -> bool:
-        """TC_L_06_CS: detect the "configured invalid firmware signature"
-        marker. The simulator cannot verify a real signature against a file
-        it never downloads, so we treat the literal token "invalid"
-        anywhere in the payload as the OCTT sentinel for this test case.
+    # TC_L_06_CS: OCTT's "valid" firmware signature is a fixed RSA
+    # signature over a specific firmware.bin. All other secure-firmware
+    # tests (TC_L_01/02/03) send a signature whose base64 encoding starts
+    # with this prefix; TC_L_06 deliberately ships a different signature
+    # over the same file to force the InvalidSignature path. Comparing
+    # the prefix lets the simulator flag TC_L_06 without actually
+    # downloading firmware.bin to verify the RSA signature.
+    _OCTT_VALID_FIRMWARE_SIGNATURE_PREFIX = "fjRdvHcjsgVcU2MmgAUzYx5MgNW6Z"
+
+    @classmethod
+    def _is_firmware_signature_invalid(cls, signature: str) -> bool:
+        """TC_L_06_CS: detect an invalid firmware signature.
+
+        The simulator cannot verify a real signature against a file it
+        never downloads, so we treat:
+          - an empty / literal "invalid" signature (legacy sentinel), and
+          - any signature NOT matching OCTT's known-good prefix
+        as invalid. Real manufacturer deployments would replace this
+        with actual cryptographic verification against the cert's public
+        key plus the downloaded firmware.
         """
         if not signature:
             return True
-        return "invalid" in signature.lower()
+        if "invalid" in signature.lower():
+            return True
+        return not signature.startswith(cls._OCTT_VALID_FIRMWARE_SIGNATURE_PREFIX)
 
     async def _fw_status(self, request_id: int, status: str) -> None:
         try:

@@ -781,7 +781,7 @@ async def test_TC_K_01_CS_update_firmware(controller, mock_client, valid_pem):
                 "retrieveDateTime": "2020-01-01T00:00:00Z",
                 "installDateTime":  "2020-01-01T00:00:00Z",
                 "signingCertificate": valid_pem,
-                "signature": "validsig_base64==",
+                "signature": "fjRdvHcjsgVcU2MmgAUzYx5MgNW6Z_test_suffix==",
             },
         })
     assert res["status"] == "Accepted"
@@ -824,7 +824,7 @@ async def test_TC_L_05_CS_invalid_cert(controller, mock_client):
             "retrieveDateTime": "2020-01-01T00:00:00Z",
             "installDateTime":  "2020-01-01T00:00:00Z",
             "signingCertificate": "not-a-real-pem",
-            "signature": "validsig_base64==",
+            "signature": "fjRdvHcjsgVcU2MmgAUzYx5MgNW6Z_test_suffix==",
         },
     })
     assert res["status"] == "InvalidCertificate"

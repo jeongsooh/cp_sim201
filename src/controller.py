@@ -1158,6 +1158,23 @@ class ChargingStationController:
             f"Active network profile switched: slot={active_slot} securityProfile={new_sp} url={new_url}"
         )
 
+    def _lookup_instanced(
+        self, comp: str, var: str, instance: Optional[str]
+    ) -> Optional[tuple]:
+        """Return (value, mutability) for an instanced device-model entry, or None.
+
+        TC_E_41_CS: OCTT queries OCPPCommCtrlr.MessageTimeout with instance
+        "Default", MessageAttempts/MessageAttemptInterval with instance
+        "TransactionEvent", etc. These live in _INSTANCED_ENTRIES rather than
+        the primary device_model dict and must be resolved separately.
+        """
+        if instance is None:
+            return None
+        for c, v, i, value, mutability in _INSTANCED_ENTRIES:
+            if c == comp and v == var and i == instance:
+                return value, mutability
+        return None
+
     async def handle_get_variables(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """TC_B_06_CS / TC_B_32_CS: Returns device model variable values.
 
@@ -1170,12 +1187,40 @@ class ChargingStationController:
         for item in payload["getVariableData"]:
             comp = item["component"]["name"]
             var  = item["variable"]["name"]
+            inst = item["variable"].get("instance")
             attr = item.get("attributeType", "Actual")
             if comp not in self.device_model:
                 results.append({
                     "attributeStatus": "UnknownComponent",
                     "component": item["component"],
                     "variable": item["variable"],
+                })
+                continue
+            # TC_E_41_CS: instanced variables live outside the main dict.
+            if inst is not None:
+                instanced = self._lookup_instanced(comp, var, inst)
+                if instanced is None:
+                    results.append({
+                        "attributeStatus": "UnknownVariable",
+                        "component": item["component"],
+                        "variable": item["variable"],
+                    })
+                    continue
+                if attr != "Actual":
+                    results.append({
+                        "attributeStatus": "NotSupportedAttributeType",
+                        "component": item["component"],
+                        "variable": item["variable"],
+                        "attributeType": attr,
+                    })
+                    continue
+                val, _ = instanced
+                results.append({
+                    "attributeStatus": "Accepted",
+                    "component": item["component"],
+                    "variable": item["variable"],
+                    "attributeType": attr,
+                    "attributeValue": val,
                 })
                 continue
             comp_data = self.device_model[comp]
@@ -1219,10 +1264,34 @@ class ChargingStationController:
         for item in payload["setVariableData"]:
             comp = item["component"]["name"]
             var  = item["variable"]["name"]
+            inst = item["variable"].get("instance")
             val  = item["attributeValue"]
             attr = item.get("attributeType", "Actual")
             if comp not in self.device_model:
                 status = "UnknownComponent"
+            elif inst is not None:
+                # TC_E_41_CS: OCTT writes MessageAttemptInterval instance
+                # "TransactionEvent" etc. Store on _INSTANCED_ENTRIES in place.
+                instanced = self._lookup_instanced(comp, var, inst)
+                if instanced is None:
+                    status = "UnknownVariable"
+                elif attr != "Actual":
+                    status = "NotSupportedAttributeType"
+                else:
+                    _, mutability = instanced
+                    if mutability == "ReadOnly":
+                        status = "Rejected"
+                    else:
+                        rejection = self._validate_variable_value(comp, var, val)
+                        if rejection:
+                            status = rejection
+                        else:
+                            # Mutate the matching row in _INSTANCED_ENTRIES.
+                            for idx, (c, v, i, _v, _m) in enumerate(_INSTANCED_ENTRIES):
+                                if c == comp and v == var and i == inst:
+                                    _INSTANCED_ENTRIES[idx] = (c, v, i, val, _m)
+                                    break
+                            status = "Accepted"
             elif var not in self.device_model[comp]:
                 status = "UnknownVariable"
             elif attr != "Actual":

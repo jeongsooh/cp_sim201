@@ -193,8 +193,21 @@ class OCPPClient:
                 )
                 if is_cert_error:
                     self.tls_cert_error_occurred = True
+                # TC_E_16_CS: a server-side rejection (HTTP 4xx/5xx,
+                # websockets.InvalidStatus) is a transient "server busy"
+                # signal rather than a genuine connection failure. OCTT in
+                # particular rejects briefly ("currently rejecting the
+                # WebSocket on purpose") and expects the CS to retry inside
+                # a short window. Cap the backoff to wait_min for these
+                # cases so the next retry happens well before OCTT's
+                # per-testcase acceptance window closes.
+                is_transient_rejection = (
+                    isinstance(e, websockets.exceptions.InvalidStatus)
+                    and not is_cert_error
+                )
                 logger.warning(
                     f"Connection error (cert_error={is_cert_error}, "
+                    f"transient={is_transient_rejection}, "
                     f"type={type(e).__name__}): {e_str[:300]}"
                 )
                 # TC_C_16_CS: drop the dead socket reference so concurrent
@@ -217,11 +230,17 @@ class OCPPClient:
                     if self._consecutive_failures == 0:
                         attempt = 0
                 wait_min, random_range, repeat_times = self._retry_config()
-                step = min(attempt, repeat_times)
-                wait_time = (
-                    wait_min * (2 ** step)
-                    + (random.randint(0, random_range) if random_range > 0 else 0)
-                )
+                if is_transient_rejection:
+                    # Don't exponentiate on transient HTTP rejections.
+                    wait_time = wait_min + (
+                        random.randint(0, random_range) if random_range > 0 else 0
+                    )
+                else:
+                    step = min(attempt, repeat_times)
+                    wait_time = (
+                        wait_min * (2 ** step)
+                        + (random.randint(0, random_range) if random_range > 0 else 0)
+                    )
                 logger.info(f"Reconnecting in {wait_time}s (attempt {attempt + 1})...")
                 await asyncio.sleep(wait_time)
                 attempt += 1

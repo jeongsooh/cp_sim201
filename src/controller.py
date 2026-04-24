@@ -2161,7 +2161,17 @@ class ChargingStationController:
             retrieve_at = self._parse_iso_datetime(retrieve_dt)
             install_at  = self._parse_iso_datetime(install_dt)
             fault       = self._firmware_location_fault(location)
-            sig_invalid = self._is_firmware_signature_invalid(signature)
+            # TC_L_08_CS: the location-fault path (invalid_firmware.bin /
+            # install_verification_failed / corrupted) reuses TC_L_06's
+            # "alt" signature bytes with a *matching* signing cert, so
+            # OCTT expects SignatureVerified here followed by
+            # InstallVerificationFailed — not InvalidSignature. Skip the
+            # signature-prefix check when the location explicitly flags
+            # an install-phase failure.
+            sig_invalid = (
+                False if fault == "install_verification_failed"
+                else self._is_firmware_signature_invalid(signature)
+            )
             allow_new_sessions = self._get_bool(
                 "FirmwareCtrlr", "AllowNewSessionsPendingFirmwareUpdate", True,
             )

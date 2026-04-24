@@ -2767,7 +2767,13 @@ class ChargingStationController:
             trigger_reason_map = {
                 "Local":           "StopAuthorized",
                 "Remote":          "RemoteStop",
-                "EVDisconnected":  "EVDeparted",
+                # TC_G_02_CS / TC_E_20_CS: cable unplug → CS loses CP-pilot
+                # communication with the EV. Per OCPP 2.0.1 Part 6
+                # validation (triggerReason must be EVCommunicationLost +
+                # stoppedReason=EVDisconnected + chargingState=Idle) this
+                # is the expected triggerReason, not EVDeparted (which is
+                # for ParkingBayOccupancy detectors).
+                "EVDisconnected":  "EVCommunicationLost",
                 "DeAuthorized":    "Deauthorized",
                 # TC_B_22_CS: Reset(Immediate) ends the tx with stoppedReason
                 # "ImmediateReset" but triggerReason "ResetCommand" (per spec).

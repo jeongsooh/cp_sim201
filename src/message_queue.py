@@ -57,3 +57,20 @@ class OfflineMessageQueue:
     def is_empty(self) -> bool:
         """큐가 비어 있으면 True를 반환한다."""
         return not os.path.exists(_QUEUE_FILE) or os.path.getsize(_QUEUE_FILE) == 0
+
+    async def peek(self) -> List[Dict[str, Any]]:
+        """큐에 저장된 메세지를 삭제하지 않고 반환한다. [TC_E_29_CS / E_31_CS / E_33_CS]"""
+        async with self._lock:
+            if not os.path.exists(_QUEUE_FILE):
+                return []
+            entries: List[Dict[str, Any]] = []
+            with open(_QUEUE_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+            return entries

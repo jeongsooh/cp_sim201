@@ -1,0 +1,6 @@
+{
+  "is_evse_available": true,
+  "scope": "ChargingStation",
+  "evse_id": null,
+  "connector_id": null
+}

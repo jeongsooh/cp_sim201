@@ -388,9 +388,11 @@ async def test_TC_E_12_CS_get_transaction_status_active(controller_with_tx):
 
 @pytest.mark.asyncio
 async def test_TC_E_12_CS_get_transaction_status_none(controller):
-    """TC_E_12_CS: GetTransactionStatus — ongoingIndicator=False when no transaction"""
+    """TC_E_34_CS: GetTransactionStatus without txId — ongoingIndicator omitted,
+    messagesInQueue=false when the offline queue has no pending TransactionEvents."""
     res = await controller.handle_get_transaction_status({})
-    assert res["ongoingIndicator"] is False
+    assert "ongoingIndicator" not in res
+    assert res["messagesInQueue"] is False
 
 
 @pytest.mark.asyncio
@@ -645,10 +647,18 @@ async def test_TC_I_get_composite_schedule_with_profiles(controller):
 
 @pytest.mark.asyncio
 async def test_TC_J_send_meter_values(controller, mock_client):
-    """TC_J: send_meter_values — sends MeterValues with P/V/I sampledValues"""
+    """TC_J: send_meter_values — sends MeterValues with P/V/I sampledValues.
+
+    Force the aligned-data measurand list explicitly so the assertion is
+    independent of whatever is currently persisted in data/device_model.json.
+    """
     with patch.object(HardwareAPI, "read_energy_meter_data",
                       return_value={"voltage": 230.0, "current": 16.0, "power": 3680.0, "energy": 0.0}):
-        await controller.send_meter_values(evse_id=1, transaction_id="TX-001")
+        await controller.send_meter_values(
+            evse_id=1,
+            transaction_id="TX-001",
+            measurands="Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
+        )
     args = mock_client.call.call_args[0]
     assert args[0] == "MeterValues"
     measurands = [sv["measurand"] for sv in args[1]["meterValue"][0]["sampledValue"]]

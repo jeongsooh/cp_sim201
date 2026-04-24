@@ -1,0 +1,75 @@
+{
+  "ChargingStation": {
+    "FirmwareVersion": "1.0.0"
+  },
+  "TokenReader": {
+    "Enabled": "true"
+  },
+  "ClockCtrlr": {
+    "TimeSource": "Heartbeat"
+  },
+  "SampledDataCtrlr": {
+    "TxUpdatedInterval": "60",
+    "TxEndedInterval": "0",
+    "TxUpdatedMeasurands": "Current.Import,Voltage,Energy.Active.Import.Register",
+    "TxStartedMeasurands": "Energy.Active.Import.Register",
+    "TxEndedMeasurands": "Energy.Active.Import.Register"
+  },
+  "AlignedDataCtrlr": {
+    "Interval": "0",
+    "TxEndedInterval": "0",
+    "Measurands": "Energy.Active.Import.Register",
+    "TxEndedMeasurands": "Energy.Active.Import.Register"
+  },
+  "HeartbeatCtrlr": {
+    "HeartbeatInterval": "60"
+  },
+  "TxCtrlr": {
+    "TxStartPoint": "Authorized,EVConnected",
+    "TxStopPoint": "Authorized,EVConnected",
+    "StopTxOnEVSideDisconnect": "true",
+    "StopTxOnInvalidId": "true",
+    "EVConnectionTimeOut": "60"
+  },
+  "AuthCtrlr": {
+    "AuthorizeRemoteStart": "true",
+    "LocalAuthorizeOffline": "true",
+    "LocalPreAuthorize": "false",
+    "OfflineTxForUnknownIdEnabled": "false"
+  },
+  "OCPPCommCtrlr": {
+    "MessageAttempts": "3",
+    "MessageAttemptInterval": "30",
+    "OfflineThreshold": "60",
+    "NetworkProfileConnectionAttempts": "3",
+    "NetworkConfigurationPriority": "0",
+    "QueueAllMessages": "false",
+    "RetryBackOffWaitMinimum": "2",
+    "RetryBackOffRepeatTimes": "10",
+    "RetryBackOffRandomRange": "3",
+    "ResetRetries": "3",
+    "UnlockOnEVSideDisconnect": "true",
+    "WebSocketPingInterval": "0"
+  },
+  "LocalAuthListCtrlr": {
+    "Enabled": "true"
+  },
+  "AuthCacheCtrlr": {
+    "Enabled": "true",
+    "LifeTime": "86400",
+    "DisablePostAuthorize": "false"
+  },
+  "SmartChargingCtrlr": {
+    "Enabled": "false",
+    "LimitChangeSignificance": "1.0"
+  },
+  "ReservationCtrlr": {
+    "Enabled": "true"
+  },
+  "SecurityCtrlr": {
+    "AllowCSMSTLSWildcards": "false",
+    "OrganizationName": "TEST_CORP",
+    "CertSigningWaitMinimum": "30",
+    "CertSigningRepeatTimes": "3"
+  }
+}

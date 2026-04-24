@@ -227,6 +227,10 @@ class ChargingStationController:
         # TC_C_32_CS: Authorization Cache — persists across reboots.
         # key = idToken value; value = {"idTokenInfo": {...}, "stored_at": epoch}
         self._auth_cache: Dict[str, Dict[str, Any]] = load_auth_cache()
+        # TC_E_31_CS: remember recently ended tx ids so GetTransactionStatus
+        # can answer ongoingIndicator=false but messagesInQueue=true if the
+        # offline queue still has events for that txId.
+        self._ended_tx_ids: set = set()
         self.transaction_id: str | None = None
         self.meter_value: float = 0.0
         self._state_c_active: bool = False
@@ -234,6 +238,11 @@ class ChargingStationController:
 
         self._heartbeat_task = None
         self._meter_task = None
+        # TC_J_01/J_02/J_03_CS: clock-aligned MeterValues. A single periodic
+        # loop that respects AlignedDataCtrlr.Interval (when outside a tx or
+        # during one) and AlignedDataCtrlr.TxEndedInterval (snapshot emitted
+        # once on tx end — driven from stop_transaction, not the loop).
+        self._aligned_data_task: Optional[asyncio.Task] = None
         # TC_E_05_CS: watchdog task for TxCtrlr.EVConnectionTimeOut — starts
         # when the user authorizes before the cable is plugged, fires if the
         # cable doesn't arrive in time and deauthorizes the session.
@@ -343,8 +352,14 @@ class ChargingStationController:
             "AlignedDataCtrlr": {
                 "Interval":          ("0",                              "ReadWrite"),
                 "TxEndedInterval":   ("0",                              "ReadWrite"),
-                "Measurands":        ("Energy.Active.Import.Register",  "ReadWrite"),
-                "TxEndedMeasurands": ("Energy.Active.Import.Register",  "ReadWrite"),
+                "Measurands":        (
+                    "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
+                    "ReadWrite",
+                ),
+                "TxEndedMeasurands": (
+                    "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
+                    "ReadWrite",
+                ),
             },
             "HeartbeatCtrlr": {
                 "HeartbeatInterval": ("60", "ReadWrite"),
@@ -857,6 +872,14 @@ class ChargingStationController:
             save_device_model(self.device_model)
             if not self._heartbeat_task or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            # TC_J_01/J_02_CS: start the clock-aligned data loop after boot.
+            if (
+                not self._aligned_data_task
+                or self._aligned_data_task.done()
+            ):
+                self._aligned_data_task = asyncio.create_task(
+                    self._aligned_data_loop()
+                )
         else:
             logger.warning(f"BootNotification Not Accepted (status={status}).")
             # TC_B_03_CS / §B03: Rejected → interval 초 후 재전송.
@@ -1362,11 +1385,48 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_get_transaction_status(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_E_12_CS: Returns whether a transaction is ongoing"""
+        """§E14 / TC_E_28..34_CS.
+
+        * transactionId omitted → `ongoingIndicator` MUST be omitted (TC_E_34).
+          Otherwise return true when the id is the live tx, false when it's a
+          previously-ended tx or completely unknown.
+        * `messagesInQueue` must be true when the offline queue still holds a
+          TransactionEvent for the queried txId (or any tx when txId omitted).
+        """
         tx_id = payload.get("transactionId")
-        ongoing = (self.transaction_id is not None) and (tx_id is None or self.transaction_id == tx_id)
-        logger.info(f"GetTransactionStatus txId={tx_id}: ongoingIndicator={ongoing}")
-        return {"messagesInQueue": False, "ongoingIndicator": ongoing}
+        # Guard against a mocked ocpp_client without offline_queue.
+        queued: List[Dict[str, Any]] = []
+        queue = getattr(self.ocpp_client, "offline_queue", None)
+        if queue is not None and hasattr(queue, "peek"):
+            try:
+                queued = await queue.peek()
+            except Exception as e:
+                logger.warning(f"offline_queue.peek failed: {e}")
+        def _queue_has_tx(target: Optional[str]) -> bool:
+            for entry in queued:
+                if entry.get("action") != "TransactionEvent":
+                    continue
+                q_tx = (entry.get("payload") or {}).get("transactionInfo", {}).get(
+                    "transactionId"
+                )
+                if target is None or q_tx == target:
+                    return True
+            return False
+        if tx_id is None:
+            # TC_E_33/E_34_CS: ongoingIndicator MUST be omitted when no txId
+            # was provided. Return only messagesInQueue.
+            messages_in_queue = _queue_has_tx(None)
+            logger.info(
+                f"GetTransactionStatus (no txId): messagesInQueue={messages_in_queue}"
+            )
+            return {"messagesInQueue": messages_in_queue}
+        messages_in_queue = _queue_has_tx(tx_id)
+        ongoing = (self.transaction_id == tx_id)
+        logger.info(
+            f"GetTransactionStatus txId={tx_id}: "
+            f"ongoingIndicator={ongoing} messagesInQueue={messages_in_queue}"
+        )
+        return {"messagesInQueue": messages_in_queue, "ongoingIndicator": ongoing}
 
     # ------------------------------------------------------------------
     # Block F — Remote Control
@@ -1460,26 +1520,53 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_change_availability(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_G_01_CS / TC_B_23_CS: Changes the operational status of the EVSE.
+        """§G / TC_G_01..G_21_CS: change operational status at CS / EVSE /
+        Connector scope.
 
-        When the admin status becomes Inoperative, StatusNotification must
-        carry connectorStatus=Unavailable (regardless of whether the cable
-        is physically plugged in); Operative restores the live physical
-        state (Available/Occupied).
+        The OCPP payload determines the scope:
+          * no `evse` field          → Charging Station scope (TC_G_05/06)
+          * `evse.id` only           → EVSE scope            (TC_G_03/04)
+          * `evse.id` + `connectorId`→ Connector scope       (TC_G_07/08)
+
+        This simulator has a single EVSE + single connector, so all three
+        scopes map onto the same underlying availability flag, but the
+        handler must still accept and respond correctly for each one.
+
+        While a transaction is active a change to Inoperative is
+        Scheduled (TC_G_11/14/17); once the tx ends the scheduled state
+        is re-applied. Operative⇢Operative and Inoperative⇢Inoperative are
+        idempotent (TC_G_09/10/12/13/15/16). The effective state is
+        persisted across reboot (TC_G_18/19/21).
         """
         status = payload["operationalStatus"]
-        logger.info(f"ChangeAvailability: {status}")
-        if status == "Inoperative":
-            if self.transaction_id:
-                # Cannot change immediately while charging; will apply after transaction ends
-                return {"status": "Scheduled"}
-            self.is_evse_available = False
-            self.device_model["EVSE"]["AvailabilityState"] = ("Inoperative", "ReadOnly")
-        else:
-            self.is_evse_available = True
-            self.device_model["EVSE"]["AvailabilityState"] = ("Available", "ReadOnly")
+        evse = payload.get("evse") or {}
+        evse_id = evse.get("id")
+        connector_id = evse.get("connectorId")
+        scope = "Connector" if connector_id is not None else (
+            "EVSE" if evse_id is not None else "ChargingStation"
+        )
+        logger.info(
+            f"ChangeAvailability scope={scope} evseId={evse_id} "
+            f"connectorId={connector_id} → {status}"
+        )
+        new_available = (status != "Inoperative")
+        if not new_available and self.transaction_id:
+            # TC_G_11/14/17: can't switch to Inoperative mid-tx; defer.
+            return {"status": "Scheduled"}
+        # Idempotent: if already in the requested state, still respond
+        # Accepted and re-emit StatusNotification per OCPP guidance.
+        self.is_evse_available = new_available
+        self.device_model["EVSE"]["AvailabilityState"] = (
+            ("Available" if new_available else "Inoperative"),
+            "ReadOnly",
+        )
         save_device_model(self.device_model)
-        save_admin_state({"is_evse_available": self.is_evse_available})
+        save_admin_state({
+            "is_evse_available": self.is_evse_available,
+            "scope": scope,
+            "evse_id": evse_id,
+            "connector_id": connector_id,
+        })
         asyncio.create_task(self._send_availability_status_notification())
         return {"status": "Accepted"}
 
@@ -1545,29 +1632,63 @@ class ChargingStationController:
     # Block J — Metering (standalone MeterValues)
     # ------------------------------------------------------------------
 
-    async def send_meter_values(self, evse_id: Optional[int] = None, transaction_id: Optional[str] = None) -> None:
-        """Sends a standalone MeterValues message (Block J)"""
+    async def send_meter_values(
+        self,
+        evse_id: Optional[int] = None,
+        transaction_id: Optional[str] = None,
+        context: str = "Sample.Periodic",
+        measurands: Optional[str] = None,
+    ) -> None:
+        """Sends a standalone MeterValues message (Block J / TC_J_01..J_03)."""
         evse_id = evse_id or self.evse_id
         meter_data = self.power_contactor_hal.read_meter_values()
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if measurands is None:
+            measurands = self._get_param(
+                "AlignedDataCtrlr", "Measurands",
+                "Energy.Active.Import.Register",
+            )
         payload = {
             "evseId": evse_id,
             "meterValue": [{
                 "timestamp": now,
-                "sampledValue": [
-                    {"value": str(meter_data.get("power",   0.0)), "measurand": "Power.Active.Import", "unit": "W"},
-                    {"value": str(meter_data.get("voltage", 0.0)), "measurand": "Voltage",             "unit": "V"},
-                    {"value": str(meter_data.get("current", 0.0)), "measurand": "Current.Import",      "unit": "A"},
-                ],
+                "sampledValue": self._build_sampled_values(
+                    measurands, meter_data, context, self.meter_value,
+                ),
             }],
         }
         if transaction_id:
             payload["transactionId"] = transaction_id
         try:
-            await self.ocpp_client.call("MeterValues", payload)
+            await self.ocpp_client.call("MeterValues", payload, allow_offline=True)
             logger.info(f"MeterValues sent for evseId={evse_id}")
         except Exception as e:
             logger.error(f"Failed to send MeterValues: {e}")
+
+    async def _aligned_data_loop(self) -> None:
+        """TC_J_01/02_CS: clock-aligned MeterValues on AlignedDataCtrlr.Interval.
+
+        The loop runs continuously once boot is Accepted. interval<=0 parks
+        the loop awaiting a future change to Interval (checked every 30s).
+        When a tx is active the sampled values are attached to the tx via the
+        transactionId so the CSMS can correlate.
+        """
+        while True:
+            try:
+                interval = self._get_int("AlignedDataCtrlr", "Interval", 0)
+                if interval <= 0:
+                    await asyncio.sleep(30)
+                    continue
+                await asyncio.sleep(interval)
+                await self.send_meter_values(
+                    transaction_id=self.transaction_id,
+                    context="Sample.Clock",
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning(f"Aligned data loop iteration failed: {e}")
+                await asyncio.sleep(30)
 
     # ------------------------------------------------------------------
     # Block K — Firmware Management
@@ -1631,6 +1752,14 @@ class ChargingStationController:
         }
         if requested not in supported:
             return {"status": "NotImplemented"}
+
+        # TC_F_26_CS (§F06.FR.04/FR.05): once BootNotification has been
+        # Accepted, a triggered BootNotification request must be Rejected.
+        # The CS only sends a fresh BootNotification after a Reset / cold
+        # start when _boot_status leaves "Accepted".
+        if requested == "BootNotification" and self._boot_status == "Accepted":
+            logger.info("TriggerMessage(BootNotification) rejected — boot already Accepted")
+            return {"status": "Rejected"}
 
         asyncio.create_task(self._send_triggered_message(requested))
         return {"status": "Accepted"}
@@ -2468,6 +2597,13 @@ class ChargingStationController:
             # response too (e.g. CSMS rolls validity forward on stop).
             if id_token is not None:
                 self._update_cache_from_tx_response(res, id_token.get("idToken"))
+            # TC_E_31_CS: remember this tx so GetTransactionStatus can still
+            # flag messagesInQueue=true after the tx has ended but replay is
+            # still pending. Cap the history to prevent unbounded growth.
+            if self.transaction_id:
+                self._ended_tx_ids.add(self.transaction_id)
+                if len(self._ended_tx_ids) > 32:
+                    self._ended_tx_ids.pop()
             self.transaction_id = None
             self.is_authorized = False
             self._state_c_active = False

@@ -1,0 +1,12 @@
+{
+  "slots": {
+    "1": {
+      "ocppVersion": "OCPP20",
+      "ocppTransport": "JSON",
+      "ocppCsmsUrl": "ws://test",
+      "messageTimeout": 30,
+      "securityProfile": 1,
+      "ocppInterface": "Wired0"
+    }
+  }
+}

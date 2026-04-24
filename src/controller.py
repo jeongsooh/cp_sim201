@@ -2190,10 +2190,17 @@ class ChargingStationController:
             )
             if scheduled_download:
                 await self._fw_status(request_id, "DownloadScheduled")
+                # TC_L_13_CS: with AllowNewSessionsPendingFirmwareUpdate=false,
+                # defer the rest of the firmware flow until the ongoing tx
+                # ends. OCTT stops the tx after 150 s; cap the wait at 200 s
+                # so a stuck tx doesn't hang the simulator forever.
                 if tx_active and not allow_new_sessions:
+                    waited = 0.0
+                    while self.transaction_id is not None and waited < 200.0:
+                        await asyncio.sleep(1.0)
+                        waited += 1.0
                     await self._set_connectors_unavailable_for_firmware()
-                # Bounded wait so OCTT can continue; real CS would wait for
-                # retrieveDateTime AND/OR tx end.
+                # TC_L_03_CS: future retrieveDateTime wait (bounded).
                 if retrieve_at is not None and retrieve_at > now:
                     delay = min((retrieve_at - now).total_seconds(), 5.0)
                     if delay > 0:

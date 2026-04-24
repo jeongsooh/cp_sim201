@@ -2059,13 +2059,17 @@ class ChargingStationController:
         """Detect OCTT failure markers in firmware.location.
 
         - "does_not_exist" prefix → TC_L_07_CS DownloadFailed.
-        - "install_verification_failed" / "corrupted" → TC_L_08_CS
-          InstallVerificationFailed.
+        - "install_verification_failed" / "corrupted" / "invalid_firmware"
+          → TC_L_08_CS InstallVerificationFailed.
         """
         loc = location.lower()
         if "does_not_exist" in loc:
             return "download_failed"
-        if "install_verification_failed" in loc or "corrupted" in loc:
+        if (
+            "install_verification_failed" in loc
+            or "corrupted" in loc
+            or "invalid_firmware" in loc
+        ):
             return "install_verification_failed"
         return None
 
@@ -3591,15 +3595,14 @@ class ChargingStationController:
         return None
 
     # TC_L_05_CS: OCTT's invalid-certificate test ships a cert whose
-    # subject CN carries a well-known marker (".incorrect"). Reject on
-    # those markers so we can still accept other plausible certificates
-    # (OCTT's valid OCTT-signed cert, a test harness self-signed cert,
-    # a real manufacturer cert etc.) without maintaining a full trust
-    # chain store. If cryptography adds revocation / full-chain checks
-    # later they can replace this.
+    # subject CN carries a well-known marker (".incorrect" suffix). We
+    # only match distinctive markers that are not naturally part of a
+    # legitimate cert name. TC_L_08_CS for example uses a cert named
+    # "Invalid Firmware SigningCertificate" that is actually valid —
+    # the test is about install-verification failure, not cert issues
+    # — so "invalid" is NOT in the reject list.
     _INVALID_FIRMWARE_CERT_CN_MARKERS = (
         "incorrect",
-        "invalid",
         "revoked",
     )
 

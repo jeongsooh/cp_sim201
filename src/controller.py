@@ -1577,7 +1577,13 @@ class ChargingStationController:
         # AuthorizeRequest as an unexpected message while OCTT still waits
         # for the RequestStart response.
         asyncio.create_task(self._remote_start_flow(id_token, remote_start_id))
-        return {"status": "Accepted"}
+        response: Dict[str, Any] = {"status": "Accepted"}
+        # TC_F_01_CS: when the tx is already running (cable-plug-first),
+        # echo the active transactionId so the CSMS can correlate the
+        # subsequent TransactionEvent with its RequestStartTransaction.
+        if self.transaction_id:
+            response["transactionId"] = self.transaction_id
+        return response
 
     async def _remote_start_flow(
         self,

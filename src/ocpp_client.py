@@ -296,6 +296,15 @@ class OCPPClient:
                 replay_results.append((entry["action"], entry["payload"], response or {}))
             except Exception as e:
                 logger.error(f"[OfflineQueue] Failed to replay {entry['action']}: {e}")
+            finally:
+                # TC_E_29_CS: drop from the in-flight shadow as soon as this
+                # entry leaves the CS — messagesInQueue stays true until the
+                # full drain loop ends, but individual ACKs shrink the set
+                # so that peek() only reports what's actually pending.
+                await self.offline_queue.ack_in_flight(entry)
+        # Safety net: anything left in-flight (never ACKed) is dropped so
+        # subsequent peeks don't leak stale state.
+        await self.offline_queue.clear_in_flight()
         if self._replay_response_hook is not None:
             for action, payload, response in replay_results:
                 try:

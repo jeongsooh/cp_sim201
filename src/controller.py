@@ -2738,6 +2738,16 @@ class ChargingStationController:
             without an EV, so suppress the emission until the cable is
             plugged back in (or the tx ends).
         """
+        # TC_J_09_CS: timestamps must be collected exactly <interval> seconds
+        # apart. Using plain sleep(interval) drifts because the TLS send
+        # roundtrip (~6s observed with OCTT) gets added to each cycle —
+        # OCTT measured 36s/37s gaps instead of 30s. Use a deadline tracked
+        # on the monotonic loop clock: each iteration's wake target is
+        # `start + N*interval`, independent of how long the previous send
+        # took. If a send overruns the next boundary (e.g. interval=1s),
+        # the sleep clamps to 0 and we fire immediately.
+        asyncio_loop = asyncio.get_running_loop()
+        next_fire = asyncio_loop.time()
         while self.transaction_id == transaction_id:
             interval = self._get_int("SampledDataCtrlr", "TxUpdatedInterval", 60)
             if interval <= 0:
@@ -2745,7 +2755,10 @@ class ChargingStationController:
                     "TxUpdatedInterval<=0 — periodic MeterValue reporting disabled"
                 )
                 return
-            await asyncio.sleep(interval)
+            next_fire += interval
+            sleep_s = next_fire - asyncio_loop.time()
+            if sleep_s > 0:
+                await asyncio.sleep(sleep_s)
 
             if self.transaction_id != transaction_id:
                 return

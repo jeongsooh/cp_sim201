@@ -258,6 +258,12 @@ class ChargingStationController:
         self._ev_connect_timeout_task: Optional[asyncio.Task] = None
         self._pending_reset: bool = False
         self._pending_reset_type: str = "Immediate"
+        # TC_L_01_CS: after a (secure) firmware install, the CS must
+        # disconnect, reboot, reconnect with BootNotification(
+        # reason=FirmwareUpdate) and THEN emit the final "Installed"
+        # FirmwareStatusNotification. _on_reconnect consumes these flags.
+        self._pending_firmware_update_reboot: bool = False
+        self._pending_firmware_update_request_id: Optional[int] = None
         # TC_J_03_CS: AlignedDataCtrlr.TxEndedInterval / TxEndedMeasurands —
         # clock-aligned samples are accumulated during the tx and flushed
         # into the Ended event's meterValue array with context=Sample.Clock.
@@ -963,7 +969,30 @@ class ChargingStationController:
     async def _on_reconnect(self) -> None:
         """연결 성립 시 호출. 최초 부팅 또는 Reset 후에만 BootNotification 전송."""
         try:
-            if self._pending_reset:
+            if self._pending_firmware_update_reboot:
+                # TC_L_01_CS: the CS just rebooted after a secure firmware
+                # install. Send BootNotification(reason=FirmwareUpdate),
+                # then the final FirmwareStatusNotification(Installed) so
+                # OCTT sees the install complete after boot.
+                fw_request_id = self._pending_firmware_update_request_id
+                self._pending_firmware_update_reboot = False
+                self._pending_firmware_update_request_id = None
+                self._first_connect = False
+                await self.boot_routine(reason="FirmwareUpdate")
+                if fw_request_id is not None:
+                    try:
+                        await self.ocpp_client.call(
+                            "FirmwareStatusNotification",
+                            {"status": "Installed", "requestId": fw_request_id},
+                        )
+                        logger.info(
+                            "FirmwareStatusNotification: Installed (post-boot)"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to send post-boot Installed: {e}"
+                        )
+            elif self._pending_reset:
                 # OCPP 2.0.1 BootReasonEnumType: only use ScheduledReset when
                 # the ResetResponse was actually "Scheduled" (OnIdle +
                 # active tx, TC_B_21). An OnIdle with no active tx is
@@ -1918,7 +1947,18 @@ class ChargingStationController:
             # TC_L_01_CS: a verified signing certificate yields
             # SignatureVerified before install proceeds.
             sequence.append("SignatureVerified")
-        sequence.extend(["Installing", "Installed"])
+        sequence.append("Installing")
+        # TC_L_01_CS: OCTT requires the sequence to include InstallRebooting
+        # right before the (simulated) reboot and then the final Installed
+        # AFTER the CS has reconnected + sent BootNotification(reason=
+        # FirmwareUpdate). We emit Downloading/Downloaded/SignatureVerified/
+        # Installing/InstallRebooting here, arm _pending_firmware_update_*,
+        # then close the ws. _on_reconnect sends the FirmwareUpdate boot
+        # and the final Installed notification.
+        if is_secure:
+            sequence.append("InstallRebooting")
+        else:
+            sequence.append("Installed")
         for fw_status in sequence:
             await asyncio.sleep(2)
             try:
@@ -1927,6 +1967,17 @@ class ChargingStationController:
                 logger.info(f"FirmwareStatusNotification: {fw_status}")
             except Exception as e:
                 logger.error(f"Failed to send FirmwareStatusNotification ({fw_status}): {e}")
+        if is_secure:
+            # Drive the reboot cycle: arm flags for _on_reconnect, then
+            # drop the ws so OCPPClient.connect() reconnects.
+            self._pending_firmware_update_reboot = True
+            self._pending_firmware_update_request_id = request_id
+            await asyncio.sleep(1)
+            if self.ocpp_client.ws:
+                try:
+                    await self.ocpp_client.ws.close()
+                except Exception as e:
+                    logger.warning(f"ws.close() on firmware-update reboot raised: {e}")
 
     async def handle_get_log(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """TC_K_03_CS: Accepts log upload request and simulates upload sequence"""

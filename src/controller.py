@@ -258,6 +258,12 @@ class ChargingStationController:
         self._ev_connect_timeout_task: Optional[asyncio.Task] = None
         self._pending_reset: bool = False
         self._pending_reset_type: str = "Immediate"
+        # TC_J_03_CS: AlignedDataCtrlr.TxEndedInterval / TxEndedMeasurands —
+        # clock-aligned samples are accumulated during the tx and flushed
+        # into the Ended event's meterValue array with context=Sample.Clock.
+        # Kept in sync with the active tx; cleared on tx end / cable unplug.
+        self._tx_ended_aligned_samples: List[Dict[str, Any]] = []
+        self._tx_ended_aligned_task: Optional[asyncio.Task] = None
         # TC_G_11/14/17_CS: ChangeAvailability(Inoperative) mid-tx returns
         # "Scheduled"; the switch must take effect once the tx ends. We
         # remember the requested scope so the deferred apply can emit the
@@ -2512,6 +2518,59 @@ class ChargingStationController:
             self._meter_task = asyncio.create_task(
                 self._meter_values_loop(self.transaction_id)
             )
+        self._start_tx_ended_aligned_loop(self.transaction_id)
+
+    def _start_tx_ended_aligned_loop(self, tx_id: str) -> None:
+        """TC_J_03_CS: launch accumulator for clock-aligned TxEnded samples.
+
+        Runs only while the tx is active; each wake emits no CSMS traffic,
+        it just appends a meterValue entry to self._tx_ended_aligned_samples
+        stamped at the clock-boundary with context=Sample.Clock. The list
+        is flushed into the Ended event's meterValue in stop_transaction.
+        """
+        self._tx_ended_aligned_samples = []
+        if self._tx_ended_aligned_task and not self._tx_ended_aligned_task.done():
+            self._tx_ended_aligned_task.cancel()
+        self._tx_ended_aligned_task = asyncio.create_task(
+            self._tx_ended_aligned_loop(tx_id)
+        )
+
+    async def _tx_ended_aligned_loop(self, tx_id: str) -> None:
+        while self.transaction_id == tx_id:
+            try:
+                interval = self._get_int("AlignedDataCtrlr", "TxEndedInterval", 0)
+                if interval <= 0:
+                    await asyncio.sleep(30)
+                    continue
+                loop = asyncio.get_running_loop()
+                now = datetime.now(timezone.utc)
+                epoch_secs = now.timestamp()
+                next_boundary = (int(epoch_secs) // interval + 1) * interval
+                await asyncio.sleep(next_boundary - epoch_secs)
+                if self.transaction_id != tx_id:
+                    return
+                boundary_dt = datetime.fromtimestamp(
+                    next_boundary, tz=timezone.utc,
+                )
+                ts_iso = boundary_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                measurands = self._get_param(
+                    "AlignedDataCtrlr", "TxEndedMeasurands",
+                    "Energy.Active.Import.Register",
+                )
+                meter_data = self.power_contactor_hal.read_meter_values()
+                sampled = self._build_sampled_values(
+                    measurands, meter_data, "Sample.Clock", self.meter_value,
+                )
+                if sampled:
+                    self._tx_ended_aligned_samples.append({
+                        "timestamp": ts_iso,
+                        "sampledValue": sampled,
+                    })
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning(f"tx-ended aligned loop iteration failed: {e}")
+                await asyncio.sleep(30)
 
     def _schedule_ev_connect_timeout(self) -> None:
         """TC_E_05_CS: arm (or re-arm) the EV cable-plug watchdog.
@@ -2623,6 +2682,7 @@ class ChargingStationController:
             self._meter_task = asyncio.create_task(
                 self._meter_values_loop(self.transaction_id)
             )
+        self._start_tx_ended_aligned_loop(self.transaction_id)
 
     async def simulate_cable_unplugged(self) -> None:
         logger.info("Cable unplugged. Connector Available.")
@@ -2779,6 +2839,7 @@ class ChargingStationController:
                 if self._meter_task:
                     self._meter_task.cancel()
                 self._meter_task = asyncio.create_task(self._meter_values_loop(self.transaction_id))
+                self._start_tx_ended_aligned_loop(self.transaction_id)
 
     async def handle_state_c(self) -> None:
         """Called by main.py ADC monitor when CP voltage drops to +6V (< 40000 ADC).
@@ -2917,14 +2978,24 @@ class ChargingStationController:
             # so a block with an empty sampledValue fails validation and the
             # whole Ended never reaches the CSMS. Only include meterValue
             # when at least one sampledValue was generated.
+            meter_value_entries: List[Dict[str, Any]] = []
+            # TC_J_03_CS: flush clock-aligned TxEnded samples accumulated
+            # during the tx (AlignedDataCtrlr.TxEndedInterval/TxEndedMeasurands)
+            # into the Ended event.
+            meter_value_entries.extend(self._tx_ended_aligned_samples)
+            self._tx_ended_aligned_samples = []
+            if self._tx_ended_aligned_task and not self._tx_ended_aligned_task.done():
+                self._tx_ended_aligned_task.cancel()
             sampled = self._build_sampled_values(
                 measurands, meter_data, "Transaction.End", self.meter_value,
             )
             if sampled:
-                payload["meterValue"] = [{
+                meter_value_entries.append({
                     "timestamp": now_iso,
                     "sampledValue": sampled,
-                }]
+                })
+            if meter_value_entries:
+                payload["meterValue"] = meter_value_entries
             # TC_C_39_CS: include the stopping token on the Ended event when
             # the stop was triggered by a scan.
             if id_token is not None:

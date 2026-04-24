@@ -2112,6 +2112,12 @@ class ChargingStationController:
         """
         if self._firmware_update_suspended_connectors:
             return
+        # OCPP 2.0.1 §L01.FR.06-07: only Available connectors get flipped.
+        # If a tx is active on this (single) connector it is Occupied, not
+        # Available — leave it alone. TC_L_13_CS: OCTT rejects an
+        # Unavailable notification while the tx is still running.
+        if self.transaction_id:
+            return
         self._firmware_update_suspended_connectors = True
         try:
             await self.ocpp_client.call("StatusNotification", {

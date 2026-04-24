@@ -972,8 +972,9 @@ class ChargingStationController:
             if self._pending_firmware_update_reboot:
                 # TC_L_01_CS: the CS just rebooted after a secure firmware
                 # install. Send BootNotification(reason=FirmwareUpdate),
-                # then the final FirmwareStatusNotification(Installed) so
-                # OCTT sees the install complete after boot.
+                # then the final FirmwareStatusNotification(Installed),
+                # then SecurityEventNotification(type=FirmwareUpdated)
+                # per TC_L_01 Step 20.
                 fw_request_id = self._pending_firmware_update_request_id
                 self._pending_firmware_update_reboot = False
                 self._pending_firmware_update_request_id = None
@@ -992,6 +993,7 @@ class ChargingStationController:
                         logger.error(
                             f"Failed to send post-boot Installed: {e}"
                         )
+                await self._send_security_event_notification("FirmwareUpdated")
             elif self._pending_reset:
                 # OCPP 2.0.1 BootReasonEnumType: only use ScheduledReset when
                 # the ResetResponse was actually "Scheduled" (OnIdle +

@@ -499,7 +499,12 @@ class OCPPClient:
                             return {}
                         raise ConnectionError(f"Not connected to CSMS: {send_err}")
                     return await asyncio.wait_for(future, timeout=timeout)
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, WaitQueueError) as call_err:
+                    # TC_E_50_CS: OCTT can answer a TransactionEvent with a
+                    # CALLERROR instead of silence — that surfaces here as
+                    # WaitQueueError (the future raised). Both outcomes count
+                    # as a failed attempt and must trigger the §E13 retry.
+                    is_timeout = isinstance(call_err, asyncio.TimeoutError)
                     attempt_idx += 1
                     if is_tx_event and attempt_idx < tx_attempts:
                         # §E13: retry on the same connection after the
@@ -509,8 +514,9 @@ class OCPPClient:
                         self._pending_calls.pop(msg_id, None)
                         self._pending_actions.pop(msg_id, None)
                         wait = tx_interval * attempt_idx
+                        reason = "no response" if is_timeout else f"CALLERROR ({call_err})"
                         logger.warning(
-                            f"TransactionEvent no response (attempt {attempt_idx}/"
+                            f"TransactionEvent {reason} (attempt {attempt_idx}/"
                             f"{tx_attempts}) — retrying in {wait}s"
                         )
                         break_to_retry = True
@@ -524,21 +530,24 @@ class OCPPClient:
                             raise WaitQueueError(
                                 f"TransactionEvent retry limit reached"
                             )
-                        # Non-TransactionEvent timeout: preserve §4.1
-                        # invariant by closing the ws so the reconnect loop
-                        # resets state (TC_C_41_CS).
-                        logger.warning(
-                            f"CALL timeout waiting for response to {action} "
-                            f"(msgId={msg_id}) — closing WS to keep §4.1"
-                        )
-                        try:
-                            if self.ws:
-                                await self.ws.close(code=1000, reason="call-timeout")
-                        except Exception:
-                            pass
-                        raise WaitQueueError(
-                            f"Timeout waiting for response to {action}"
-                        )
+                        # Non-TransactionEvent failure propagates as-is for
+                        # WaitQueueError, or §4.1 ws-close for TimeoutError.
+                        if is_timeout:
+                            logger.warning(
+                                f"CALL timeout waiting for response to {action} "
+                                f"(msgId={msg_id}) — closing WS to keep §4.1"
+                            )
+                            try:
+                                if self.ws:
+                                    await self.ws.close(
+                                        code=1000, reason="call-timeout"
+                                    )
+                            except Exception:
+                                pass
+                            raise WaitQueueError(
+                                f"Timeout waiting for response to {action}"
+                            )
+                        raise
                 finally:
                     self._pending_calls.pop(msg_id, None)
                     self._pending_actions.pop(msg_id, None)

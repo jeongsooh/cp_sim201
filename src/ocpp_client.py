@@ -227,27 +227,37 @@ class OCPPClient:
                 attempt += 1
 
     async def _drain_offline_queue(self) -> None:
-        """재연결 후 오프라인 큐에 저장된 메세지를 순차 재전송한다."""
+        """재연결 후 오프라인 큐에 저장된 메세지를 순차 재전송한다.
+
+        TC_E_16_CS: replay hooks run AFTER every message in the queue has
+        been delivered. Firing a deauth stop_transaction mid-drain would
+        interleave a fresh Ended event (seqNo n+1) between still-queued
+        Updated events (seqNo < n), producing an out-of-order stream. By
+        collecting (action, payload, response) triples and running the hook
+        only after the drain loop terminates, the spec-required ordering
+        (all queued-offline events first, then the fresh Ended on Invalid)
+        is preserved.
+        """
         if self.offline_queue.is_empty():
             return
         entries = await self.offline_queue.drain()
         logger.info(f"[OfflineQueue] Replaying {len(entries)} queued messages")
+        replay_results: List[tuple] = []
         for entry in entries:
             try:
                 response = await self.call(entry["action"], entry["payload"])
                 logger.info(f"[OfflineQueue] Replayed: {entry['action']}")
-                if self._replay_response_hook is not None:
-                    try:
-                        await self._replay_response_hook(
-                            entry["action"], entry["payload"], response or {},
-                        )
-                    except Exception as hook_err:
-                        logger.error(
-                            f"[OfflineQueue] Replay hook for {entry['action']} "
-                            f"failed: {hook_err}"
-                        )
+                replay_results.append((entry["action"], entry["payload"], response or {}))
             except Exception as e:
                 logger.error(f"[OfflineQueue] Failed to replay {entry['action']}: {e}")
+        if self._replay_response_hook is not None:
+            for action, payload, response in replay_results:
+                try:
+                    await self._replay_response_hook(action, payload, response)
+                except Exception as hook_err:
+                    logger.error(
+                        f"[OfflineQueue] Replay hook for {action} failed: {hook_err}"
+                    )
 
     async def _listen(self) -> None:
         try:

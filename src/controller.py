@@ -2146,11 +2146,16 @@ class ChargingStationController:
             "evseId": self.evse_id,
             "connectorId": self.connector_id
         }
+        # TC_E_16_CS: StatusNotification must be queued offline so the CSMS
+        # eventually sees the plug event. Don't short-circuit the tx-update
+        # path below when the ws is down — the tx Updated event must be
+        # queued alongside it.
         try:
-            await self.ocpp_client.call("StatusNotification", payload)
+            await self.ocpp_client.call(
+                "StatusNotification", payload, allow_offline=True,
+            )
         except Exception as e:
             logger.error(f"Failed to send cable-plug StatusNotification: {e}")
-            return
 
         # OCPP 2.0.1 §E02: TxStartPoint is OR — if "EVConnected" is listed,
         # the transaction starts as soon as the EV is connected, before/without
@@ -2379,7 +2384,9 @@ class ChargingStationController:
             "connectorId": self.connector_id
         }
         try:
-            await self.ocpp_client.call("StatusNotification", payload)
+            await self.ocpp_client.call(
+                "StatusNotification", payload, allow_offline=True,
+            )
         except Exception as e:
             logger.error(f"Failed to process cable unplug: {e}")
 

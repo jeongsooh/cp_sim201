@@ -56,6 +56,10 @@ class OCPPClient:
         # CSMS may change at runtime. Without a provider, the static
         # OCPPConfig defaults are used.
         self._retry_config_provider: Optional[Callable[[], Tuple[int, int, int]]] = None
+        # TC_E_41/E_42/E_50/E_51_CS: TransactionEvent retry uses a different
+        # OCPP 2.0.1 §E13 mechanism (MessageAttempts + MessageAttemptInterval,
+        # instance=TransactionEvent). Provider returns (attempts, interval).
+        self._tx_retry_config_provider: Optional[Callable[[], Tuple[int, int]]] = None
         # TC_B_46_CS: after N consecutive failed connection attempts on the
         # current slot, let the controller advance to the next slot in
         # NetworkConfigurationPriority. Handler is invoked with the running
@@ -144,6 +148,24 @@ class OCPPClient:
         self, provider: Optional[Callable[[], Tuple[int, int, int]]]
     ) -> None:
         self._retry_config_provider = provider
+
+    def set_tx_retry_config_provider(
+        self, provider: Optional[Callable[[], Tuple[int, int]]]
+    ) -> None:
+        """TC_E_41_CS: provider returns (MessageAttempts, MessageAttemptInterval)
+        for TransactionEvent — read from OCPPCommCtrlr instance=TransactionEvent.
+        """
+        self._tx_retry_config_provider = provider
+
+    def _tx_retry_config(self) -> Tuple[int, int]:
+        if self._tx_retry_config_provider is not None:
+            try:
+                return self._tx_retry_config_provider()
+            except Exception as e:
+                logger.warning(
+                    f"tx_retry_config_provider failed, using defaults: {e}"
+                )
+        return (3, 60)
 
     def set_connection_failure_handler(
         self, handler: Optional[Callable[[int], None]]
@@ -426,57 +448,94 @@ class OCPPClient:
         except ValueError as e:
             raise WaitQueueError(f"Client payload validation failed: {e}")
 
-        async with self._call_lock:
-            msg_id   = str(uuid.uuid4())
-            call_msg = [OCPPConfig.MESSAGE_TYPE_CALL, msg_id, action, payload]
+        # TC_E_41/E_42/E_50/E_51_CS: TransactionEvent gets its own §E13 retry
+        # schedule (MessageAttempts + MessageAttemptInterval). The CS resends
+        # on the same connection without closing the ws — OCTT validates that
+        # the same message is sent the configured number of times.
+        is_tx_event = (action == "TransactionEvent")
+        tx_attempts, tx_interval = self._tx_retry_config() if is_tx_event else (1, 0)
+        attempt_idx = 0
+        while True:
+            async with self._call_lock:
+                msg_id   = str(uuid.uuid4())
+                call_msg = [OCPPConfig.MESSAGE_TYPE_CALL, msg_id, action, payload]
 
-            future = asyncio.get_event_loop().create_future()
-            self._pending_calls[msg_id]  = future
-            self._pending_actions[msg_id] = action
+                future = asyncio.get_event_loop().create_future()
+                self._pending_calls[msg_id]  = future
+                self._pending_actions[msg_id] = action
 
-            try:
-                raw_msg = json.dumps(call_msg)
-                logger.info(f"WS SEND: msgId={msg_id} action={action} payload={raw_msg[:200]}")
                 try:
-                    await self.ws.send(raw_msg)
-                except (ConnectionClosed, OSError) as send_err:
-                    # TC_C_16_CS: the listener may not have set self.ws=None
-                    # yet when a close frame races with our send. Treat this
-                    # as offline and queue if the caller permitted it.
-                    logger.warning(
-                        f"WS send failed ({type(send_err).__name__}); "
-                        f"ws appeared alive but is closed"
-                    )
-                    self.ws = None
+                    raw_msg = json.dumps(call_msg)
+                    logger.info(f"WS SEND: msgId={msg_id} action={action} payload={raw_msg[:200]}")
+                    try:
+                        await self.ws.send(raw_msg)
+                    except (ConnectionClosed, OSError) as send_err:
+                        # TC_C_16_CS: the listener may not have set self.ws=None
+                        # yet when a close frame races with our send. Treat this
+                        # as offline and queue if the caller permitted it.
+                        logger.warning(
+                            f"WS send failed ({type(send_err).__name__}); "
+                            f"ws appeared alive but is closed"
+                        )
+                        self.ws = None
+                        self._pending_calls.pop(msg_id, None)
+                        self._pending_actions.pop(msg_id, None)
+                        if allow_offline:
+                            if action == "TransactionEvent":
+                                payload = {**payload, "offline": True}
+                            await self.offline_queue.enqueue(action, payload)
+                            return {}
+                        raise ConnectionError(f"Not connected to CSMS: {send_err}")
+                    return await asyncio.wait_for(future, timeout=timeout)
+                except asyncio.TimeoutError:
+                    attempt_idx += 1
+                    if is_tx_event and attempt_idx < tx_attempts:
+                        # §E13: retry on the same connection after the
+                        # interval * retry-count. Release the lock so the
+                        # listener can still process incoming RECVs, then
+                        # reacquire for the next attempt.
+                        self._pending_calls.pop(msg_id, None)
+                        self._pending_actions.pop(msg_id, None)
+                        wait = tx_interval * attempt_idx
+                        logger.warning(
+                            f"TransactionEvent no response (attempt {attempt_idx}/"
+                            f"{tx_attempts}) — retrying in {wait}s"
+                        )
+                        break_to_retry = True
+                    else:
+                        break_to_retry = False
+                        if is_tx_event:
+                            logger.warning(
+                                f"TransactionEvent exhausted {tx_attempts} attempts —"
+                                f" giving up without closing ws (§E13)"
+                            )
+                            raise WaitQueueError(
+                                f"TransactionEvent retry limit reached"
+                            )
+                        # Non-TransactionEvent timeout: preserve §4.1
+                        # invariant by closing the ws so the reconnect loop
+                        # resets state (TC_C_41_CS).
+                        logger.warning(
+                            f"CALL timeout waiting for response to {action} "
+                            f"(msgId={msg_id}) — closing WS to keep §4.1"
+                        )
+                        try:
+                            if self.ws:
+                                await self.ws.close(code=1000, reason="call-timeout")
+                        except Exception:
+                            pass
+                        raise WaitQueueError(
+                            f"Timeout waiting for response to {action}"
+                        )
+                finally:
                     self._pending_calls.pop(msg_id, None)
                     self._pending_actions.pop(msg_id, None)
-                    if allow_offline:
-                        if action == "TransactionEvent":
-                            payload = {**payload, "offline": True}
-                        await self.offline_queue.enqueue(action, payload)
-                        return {}
-                    raise ConnectionError(f"Not connected to CSMS: {send_err}")
-                return await asyncio.wait_for(future, timeout=timeout)
-            except asyncio.TimeoutError:
-                # OCPP 2.0.1 §4.1: only one outstanding CALL is allowed per
-                # direction. If the local wait times out we cannot safely send
-                # the next CALL on this connection — the peer may still answer
-                # the old msgId and a new CALL would violate the rule (seen in
-                # TC_C_41_CS where OCTT blocked on user input for 30s). Close
-                # the socket so the existing reconnect loop resets state.
-                logger.warning(
-                    f"CALL timeout waiting for response to {action} (msgId={msg_id}) — "
-                    f"closing WS to keep §4.1 single-outstanding-CALL invariant"
-                )
-                try:
-                    if self.ws:
-                        await self.ws.close(code=1000, reason="call-timeout")
-                except Exception:
-                    pass
-                raise WaitQueueError(f"Timeout waiting for response to {action}")
-            finally:
-                self._pending_calls.pop(msg_id, None)
-                self._pending_actions.pop(msg_id, None)
+            # Fell out of async-with (lock released). Wait the retry interval
+            # outside the lock so other traffic can flow if needed.
+            if break_to_retry:
+                await asyncio.sleep(wait)
+                continue
+            return {}  # unreachable under normal flow
 
     async def _send_result(self, msg_id: str, payload: Dict) -> None:
         if not self.ws:

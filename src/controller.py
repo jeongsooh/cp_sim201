@@ -524,6 +524,12 @@ class ChargingStationController:
         # TC_B_51_CS: reconnect backoff must honour the OCPPCommCtrlr variables
         # the CSMS sets at runtime (e.g. RetryBackOffWaitMinimum=64).
         self.ocpp_client.set_retry_config_provider(self._retry_backoff_config)
+        # TC_E_41/E_42/E_50/E_51_CS: TransactionEvent retry uses §E13 schedule
+        # driven by MessageAttempts / MessageAttemptInterval (instance
+        # "TransactionEvent"). Expose via _tx_retry_config so ocpp_client can
+        # read current values at each call.
+        if hasattr(self.ocpp_client, "set_tx_retry_config_provider"):
+            self.ocpp_client.set_tx_retry_config_provider(self._tx_retry_config)
         # TC_B_46_CS: after NetworkProfileConnectionAttempts failed attempts on
         # the current slot, fall back to the next slot in
         # NetworkConfigurationPriority.
@@ -643,6 +649,24 @@ class ChargingStationController:
             "OCPPCommCtrlr", "RetryBackOffRepeatTimes", _Cfg.RETRY_BACKOFF_REPEAT_TIMES
         )
         return wait_min, random_range, repeat_times
+
+    def _tx_retry_config(self):
+        """TC_E_41_CS: return (MessageAttempts, MessageAttemptInterval) for
+        TransactionEvent, read from _INSTANCED_ENTRIES (instance=TransactionEvent).
+        """
+        attempts = 3
+        interval = 60
+        for comp, var, inst, value, _ in _INSTANCED_ENTRIES:
+            if comp != "OCPPCommCtrlr" or inst != "TransactionEvent":
+                continue
+            try:
+                if var == "MessageAttempts":
+                    attempts = int(value)
+                elif var == "MessageAttemptInterval":
+                    interval = int(value)
+            except (TypeError, ValueError):
+                pass
+        return attempts, interval
 
     def _boot_state_message_gate(self, action: str):
         """Return (error_code, desc) to reject the incoming CSMS action, or None to allow.

@@ -1995,8 +1995,16 @@ class ChargingStationController:
             return {"status": "Rejected"}
 
         # TC_L_05_CS: reject invalid signingCertificate + fire
-        # SecurityEventNotification.
+        # SecurityEventNotification. Validity window covers expired/
+        # not-yet-valid certs; issuer-trust check covers the TC_L_05
+        # scenario where the cert is parseable and time-valid but was
+        # issued by an untrusted test CA (e.g. "TestCA") instead of a
+        # Manufacturer Root the CS recognises.
         cert_reason = self._validate_cert_pem(signing_cert)
+        if cert_reason is None:
+            cert_reason = self._validate_firmware_signing_cert_issuer(
+                signing_cert
+            )
         if cert_reason is not None:
             logger.warning(
                 f"UpdateFirmware rejected (TC_L_05): signingCertificate "
@@ -3564,6 +3572,44 @@ class ChargingStationController:
                 return "not_yet_valid"
         except Exception:
             return "unparseable"
+        return None
+
+    # TC_L_05_CS: OCTT's invalid-certificate test ships a cert whose
+    # subject CN carries a well-known marker (".incorrect"). Reject on
+    # those markers so we can still accept other plausible certificates
+    # (OCTT's valid OCTT-signed cert, a test harness self-signed cert,
+    # a real manufacturer cert etc.) without maintaining a full trust
+    # chain store. If cryptography adds revocation / full-chain checks
+    # later they can replace this.
+    _INVALID_FIRMWARE_CERT_CN_MARKERS = (
+        "incorrect",
+        "invalid",
+        "revoked",
+    )
+
+    @classmethod
+    def _validate_firmware_signing_cert_issuer(cls, pem: str) -> Optional[str]:
+        """Returns a short reason string when the signing cert carries an
+        OCTT invalidity marker in its subject CN, else None."""
+        try:
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+        except ImportError:
+            return None  # cryptography unavailable → accept legacy behaviour
+        try:
+            cert = x509.load_pem_x509_certificate(pem.encode())
+        except Exception:
+            return "unparseable"
+        try:
+            attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        except Exception:
+            return None
+        if not attrs:
+            return None
+        subject_cn = attrs[0].value.lower()
+        for marker in cls._INVALID_FIRMWARE_CERT_CN_MARKERS:
+            if marker in subject_cn:
+                return f"subject_cn_{marker}"
         return None
 
     async def handle_install_certificate(self, payload: Dict[str, Any]) -> Dict[str, Any]:

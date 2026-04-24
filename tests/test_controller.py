@@ -10,6 +10,9 @@ def mock_client():
     client = AsyncMock(spec=OCPPClient)
     # Give a default successful response for all calls
     client.call.return_value = {"status": "Accepted", "idTokenInfo": {"status": "Accepted"}}
+    # Represent an online ws so stop_transaction takes the online branch
+    # (TC_E_45_CS offline scan-stop split is gated on a live ws).
+    client.ws = object()
     return client
 
 @pytest.fixture

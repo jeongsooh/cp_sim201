@@ -234,6 +234,15 @@ class ChargingStationController:
         self.transaction_id: str | None = None
         self.meter_value: float = 0.0
         self._state_c_active: bool = False
+        # TC_E_45_CS: cp_adc_monitor and proximity_monitor can race on cable
+        # plug — ADC typically sees State C within 0.5s while proximity
+        # debounces over 1.0s. Without this flag, handle_state_c (from ADC)
+        # fires before simulate_cable_plugged emits CablePluggedIn, leaving
+        # the cable-plug event queued offline when the ws closes in between.
+        # The flag is set only after CablePluggedIn has been sent/queued,
+        # guaranteeing the event order CablePluggedIn → ChargingStateChanged
+        # regardless of which monitor wakes first.
+        self._cable_plug_event_sent: bool = False
         self._tx_seq_no: int = 0
 
         self._heartbeat_task = None
@@ -2274,6 +2283,10 @@ class ChargingStationController:
             if self.is_authorized:
                 self.power_contactor_hal.control_relay("Close")
             await self._send_tx_updated("CablePluggedIn")
+            # TC_E_45_CS: release handle_state_c once CablePluggedIn has
+            # been emitted so the ChargingStateChanged event (whether
+            # fired below or by cp_adc_monitor next) strictly follows it.
+            self._cable_plug_event_sent = True
         elif "EVConnected" in tx_start_points:
             await self._start_tx_on_ev_connected()
             # If already authorized (RFID scanned first), energize immediately.
@@ -2313,6 +2326,11 @@ class ChargingStationController:
         self.transaction_id = str(uuid.uuid4())
         self.meter_value = 0.0
         self._state_c_active = False
+        # TC_E_45_CS: if the tx started with the cable already plugged in
+        # (e.g. Authorized+Occupied on first scan) treat CablePluggedIn as
+        # already-observed — otherwise handle_state_c from cp_adc_monitor
+        # would block forever waiting for simulate_cable_plugged to fire.
+        self._cable_plug_event_sent = (self.connector_hal.status == "Occupied")
         self._tx_seq_no = 0
         # TC_E_05_CS: arm the EVConnectionTimeOut watchdog BEFORE sending the
         # Started event. OCTT measures the timeout from the moment it
@@ -2442,6 +2460,10 @@ class ChargingStationController:
         self.transaction_id = str(uuid.uuid4())
         self.meter_value = 0.0
         self._state_c_active = False
+        # TC_E_45_CS: the Started event carries triggerReason=CablePluggedIn
+        # here — cable plug is already the start trigger, so future
+        # ChargingStateChanged events from cp_adc_monitor are ok.
+        self._cable_plug_event_sent = True
         self._tx_seq_no = 0
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         measurands = self._get_param(
@@ -2481,6 +2503,9 @@ class ChargingStationController:
     async def simulate_cable_unplugged(self) -> None:
         logger.info("Cable unplugged. Connector Available.")
         self.connector_hal.status = "Available"
+        # TC_E_45_CS: reset the cable-plug gate so the next plug-in cycle
+        # emits CablePluggedIn before State C again.
+        self._cable_plug_event_sent = False
         if self.transaction_id:
             if self._get_bool("TxCtrlr", "StopTxOnEVSideDisconnect", True):
                 logger.info("Transaction active during unplug. Stopping transaction (EVDisconnected).")
@@ -2582,6 +2607,10 @@ class ChargingStationController:
                 self.transaction_id = str(uuid.uuid4())
                 self.meter_value = 0.0
                 self._state_c_active = False
+                # TC_E_45_CS: tx starts with cable already plugged, so
+                # CablePluggedIn is already "observed" — allow handle_state_c
+                # to run without waiting for a new cable-plug event.
+                self._cable_plug_event_sent = True
                 self._tx_seq_no = 0
                 now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 meter_data = self.power_contactor_hal.read_meter_values()
@@ -2622,8 +2651,21 @@ class ChargingStationController:
         yet (tx started on CablePluggedIn alone), we stay silent: the CP
         transition is just "EV ready", not "charging". The event will fire
         once authorization arrives and the relay closes.
+
+        TC_E_45_CS: gate on _cable_plug_event_sent so CablePluggedIn is
+        always emitted BEFORE ChargingStateChanged. Without this, the ADC
+        monitor beats the proximity debounce and fires State C first,
+        leaving the cable-plug event to race in afterwards (and often get
+        orphaned into the offline queue when the ws closes).
+        simulate_cable_plugged re-drives handle_state_c after emitting
+        CablePluggedIn, so deferring here doesn't drop the event.
         """
-        if not (self.transaction_id and not self._state_c_active and self.is_authorized):
+        if not (
+            self.transaction_id
+            and not self._state_c_active
+            and self.is_authorized
+            and self._cable_plug_event_sent
+        ):
             return
         # Snapshot the txId so a concurrent stop_transaction clearing it mid-flight
         # doesn't leave us sending an event with an invalid id.
@@ -2653,6 +2695,27 @@ class ChargingStationController:
         id_token: Optional[Dict[str, Any]] = None,
     ) -> None:
         if self.transaction_id:
+            # TC_E_45_CS: when a scan-stop happens while the CS is offline,
+            # OCTT's reusable "StopAuthorized" validation (cs_test_cases.txt
+            # §Reusable state StopAuthorized) requires two TransactionEvents:
+            #   1. Updated(triggerReason=StopAuthorized, chargingState=Charging)
+            #   2. Ended(triggerReason=ChargingStateChanged, chargingState=
+            #      EVConnected, stoppedReason=Local)
+            # Online scan-stop keeps the single-Ended form (TC_E_15_CS's
+            # strict per-message check: triggerReason=StopAuthorized +
+            # stoppedReason=Local + eventType=Ended must coexist on the
+            # same message).
+            is_offline_scan_stop = (
+                stopped_reason == "Local"
+                and not getattr(self.ocpp_client, "ws", None)
+            )
+            if is_offline_scan_stop:
+                # First event: Updated(StopAuthorized) while chargingState is
+                # still Charging (relay not yet opened). idToken SHOULD be
+                # included per E07.FR.02 — on same-idToken stop this is the
+                # starting token, on same-group stop the stopping token.
+                await self._send_tx_updated("StopAuthorized", id_token=id_token)
+
             self.power_contactor_hal.control_relay("Open")
             # Restore 100% PWM (+12V Standing State)
             self.power_contactor_hal.set_pwm_duty(100)
@@ -2677,6 +2740,11 @@ class ChargingStationController:
                 "Timeout":         "EVConnectTimeout",
             }
             trigger_reason = trigger_reason_map.get(stopped_reason, "StopAuthorized")
+            # TC_E_45_CS: offline scan-stop's Ended event reports the
+            # chargingState transition as its trigger (the earlier
+            # Updated already signalled StopAuthorized).
+            if is_offline_scan_stop:
+                trigger_reason = "ChargingStateChanged"
 
             meter_data = self.power_contactor_hal.read_meter_values()
             measurands = self._get_param("SampledDataCtrlr", "TxEndedMeasurands",

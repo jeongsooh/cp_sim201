@@ -25,6 +25,9 @@ def mock_client():
         "idTokenInfo": {"status": "Accepted"},
     }
     client.register_action_handler = MagicMock()
+    # Represent an online ws so stop_transaction takes the online branch
+    # (TC_E_45_CS offline scan-stop split is gated on a live ws).
+    client.ws = object()
     return client
 
 
@@ -41,6 +44,10 @@ def controller_with_tx(mock_client, tmp_path):
     ctrl.is_authorized = True
     ctrl.transaction_id = "TX-TEST-001"
     ctrl._tx_seq_no = 1
+    # TC_E_45_CS: handle_state_c now waits for CablePluggedIn to have been
+    # emitted; for fixtures that pre-seed an active tx, treat the cable
+    # plug as already observed so State C events aren't suppressed.
+    ctrl._cable_plug_event_sent = True
     return ctrl
 
 

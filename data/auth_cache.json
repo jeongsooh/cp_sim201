@@ -3,12 +3,18 @@
     "idTokenInfo": {
       "status": "Accepted"
     },
-    "stored_at": 1776993828.3594224
+    "stored_at": 1777028743.0318294
   },
   "REMOTE_UID": {
     "idTokenInfo": {
       "status": "Accepted"
     },
-    "stored_at": 1776993828.3923817
+    "stored_at": 1777028743.064315
+  },
+  "VALID_ID_OK": {
+    "idTokenInfo": {
+      "status": "Accepted"
+    },
+    "stored_at": 1777028769.3875802
   }
 }

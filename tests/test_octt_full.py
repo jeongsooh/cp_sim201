@@ -37,6 +37,34 @@ def controller(mock_client, tmp_path):
 
 
 @pytest.fixture
+def valid_pem():
+    """A self-signed certificate PEM that passes handle_install_certificate's
+    validity-window check (TC_M_07_CS). Generated once per session.
+    """
+    from datetime import datetime, timedelta, timezone
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, "cp_sim201-test-ca"),
+    ])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
+        .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+
+@pytest.fixture
 def controller_with_tx(mock_client, tmp_path):
     """Controller pre-loaded with an active transaction."""
     ctrl = ChargingStationController(mock_client, cert_dir=str(tmp_path))
@@ -78,21 +106,30 @@ async def test_TC_A_04_05_CS(controller, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_TC_A_06_07_CS(controller, mock_client):
+async def test_TC_A_06_07_CS(controller, mock_client, valid_pem):
     """TC_A_06_CS, TC_A_07_CS: InstallCertificate — 파일 저장 및 메모리 등록"""
     res = await controller.handle_install_certificate(
-        {"certificateType": "CSMSRootCertificate", "certificate": "dummy_pem_rsa"}
+        {"certificateType": "CSMSRootCertificate", "certificate": valid_pem}
     )
     assert res["status"] == "Accepted"
-    serial = controller._make_cert_hash_data("dummy_pem_rsa")["serialNumber"]
+    serial = controller._make_cert_hash_data(valid_pem)["serialNumber"]
     assert serial in controller.installed_certificates
 
 
 @pytest.mark.asyncio
-async def test_TC_A_09_10_CS(controller, mock_client):
+async def test_TC_M_07_CS(controller, mock_client):
+    """TC_M_07_CS: InstallCertificate rejects malformed/expired certificate."""
+    res = await controller.handle_install_certificate(
+        {"certificateType": "CSMSRootCertificate", "certificate": "not-a-pem"}
+    )
+    assert res["status"] == "Rejected"
+
+
+@pytest.mark.asyncio
+async def test_TC_A_09_10_CS(controller, mock_client, valid_pem):
     """TC_A_09_CS, TC_A_10_CS: GetInstalledCertificateIds — 설치 후 목록 조회"""
     await controller.handle_install_certificate(
-        {"certificateType": "CSMSRootCertificate", "certificate": "dummy_pem"}
+        {"certificateType": "CSMSRootCertificate", "certificate": valid_pem}
     )
     res = await controller.handle_get_installed_certificate_ids(
         {"certificateType": ["CSMSRootCertificate"]}
@@ -103,18 +140,31 @@ async def test_TC_A_09_10_CS(controller, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_TC_A_11_12_CS(controller, mock_client):
+async def test_TC_A_11_12_CS(controller, mock_client, valid_pem):
     """TC_A_11_CS, TC_A_12_CS: DeleteCertificate — 설치 후 삭제"""
-    pem = "dummy_pem_to_delete"
     await controller.handle_install_certificate(
-        {"certificateType": "CSMSRootCertificate", "certificate": pem}
+        {"certificateType": "CSMSRootCertificate", "certificate": valid_pem}
     )
-    serial = controller._make_cert_hash_data(pem)["serialNumber"]
+    serial = controller._make_cert_hash_data(valid_pem)["serialNumber"]
     res = await controller.handle_delete_certificate(
         {"certificateHashData": {"serialNumber": serial}}
     )
     assert res["status"] == "Accepted"
     assert serial not in controller.installed_certificates
+
+
+@pytest.mark.asyncio
+async def test_TC_M_23_CS(controller, mock_client, valid_pem):
+    """TC_M_23_CS: DeleteCertificate refuses ChargingStationCertificate."""
+    await controller.handle_install_certificate(
+        {"certificateType": "ChargingStationCertificate", "certificate": valid_pem}
+    )
+    serial = controller._make_cert_hash_data(valid_pem)["serialNumber"]
+    res = await controller.handle_delete_certificate(
+        {"certificateHashData": {"serialNumber": serial}}
+    )
+    assert res["status"] == "Failed"
+    assert serial in controller.installed_certificates
 
 
 @pytest.mark.asyncio
@@ -138,15 +188,36 @@ async def test_TC_A_15_CS(controller, mock_client):
 
 
 @pytest.mark.asyncio
-async def test_TC_A_19_20_CS(controller, mock_client):
+async def test_TC_A_19_20_CS(controller, mock_client, valid_pem):
     """TC_A_19_CS, TC_A_20_CS: CertificateSigned — 파일 저장, 즉시 재연결 없음"""
     res = await controller.handle_certificate_signed({
-        "certificateChain": "dummy_signed_cert",
+        "certificateChain": valid_pem,
         "certificateType": "ChargingStationCertificate",
     })
     assert res["status"] == "Accepted"
     assert controller._pending_client_cert is not None
     assert "client.crt" in controller._pending_client_cert
+
+
+@pytest.mark.asyncio
+async def test_TC_A_14_CS(controller, mock_client):
+    """TC_A_14_CS: CertificateSigned with an invalid chain → Rejected and a
+    SecurityEventNotification(type=InvalidChargingStationCertificate)."""
+    res = await controller.handle_certificate_signed({
+        "certificateChain": "garbage-not-a-pem",
+        "certificateType": "ChargingStationCertificate",
+    })
+    assert res["status"] == "Rejected"
+    # SecurityEventNotification is scheduled async — let it run.
+    await asyncio.sleep(0)
+    sec_calls = [
+        c for c in mock_client.call.call_args_list
+        if c.args and c.args[0] == "SecurityEventNotification"
+    ]
+    assert any(
+        c.args[1]["type"] == "InvalidChargingStationCertificate"
+        for c in sec_calls
+    )
 
 
 def test_TC_A_21_22_23_CS():
@@ -699,22 +770,120 @@ async def test_TC_J_02_CS_meter_values_loop_increments(controller_with_tx, mock_
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_TC_K_01_CS_update_firmware(controller, mock_client):
-    """TC_K_01_CS: UpdateFirmware — Accepted, then sends 4 FirmwareStatusNotification"""
+async def test_TC_K_01_CS_update_firmware(controller, mock_client, valid_pem):
+    """TC_K_01_CS: UpdateFirmware — secure payload Accepted, sequence covers
+    Downloading / Downloaded / SignatureVerified."""
     with patch("asyncio.sleep", new_callable=AsyncMock):
         res = await controller.handle_update_firmware({
             "requestId": 1,
-            "firmware": {"location": "http://fw.example.com/fw.bin",
-                         "retrieveDateTime": "2026-05-01T00:00:00Z"},
+            "firmware": {
+                "location": "http://fw.example.com/fw.bin",
+                "retrieveDateTime": "2020-01-01T00:00:00Z",
+                "installDateTime":  "2020-01-01T00:00:00Z",
+                "signingCertificate": valid_pem,
+                "signature": "validsig_base64==",
+            },
         })
     assert res["status"] == "Accepted"
-    await asyncio.sleep(0)
-    await controller._simulate_firmware_update(1)
+    # Let the background task run to completion.
+    if controller._firmware_update_task is not None:
+        try:
+            await controller._firmware_update_task
+        except Exception:
+            pass
     fw_notifs = [c for c in mock_client.call.call_args_list
                  if c[0][0] == "FirmwareStatusNotification"]
     statuses = [c[0][1]["status"] for c in fw_notifs]
     assert "Downloading" in statuses
-    assert "Installed" in statuses
+    assert "Downloaded" in statuses
+    assert "SignatureVerified" in statuses
+
+
+@pytest.mark.asyncio
+async def test_TC_L_18_CS_missing_signature(controller, mock_client):
+    """TC_L_18_CS: UpdateFirmware without signingCertificate/signature →
+    Rejected."""
+    res = await controller.handle_update_firmware({
+        "requestId": 99,
+        "firmware": {
+            "location": "http://fw.example.com/fw.bin",
+            "retrieveDateTime": "2026-05-01T00:00:00Z",
+        },
+    })
+    assert res["status"] == "Rejected"
+
+
+@pytest.mark.asyncio
+async def test_TC_L_05_CS_invalid_cert(controller, mock_client):
+    """TC_L_05_CS: UpdateFirmware with an unparseable signingCertificate →
+    InvalidCertificate + SecurityEventNotification."""
+    res = await controller.handle_update_firmware({
+        "requestId": 98,
+        "firmware": {
+            "location": "http://fw.example.com/fw.bin",
+            "retrieveDateTime": "2020-01-01T00:00:00Z",
+            "installDateTime":  "2020-01-01T00:00:00Z",
+            "signingCertificate": "not-a-real-pem",
+            "signature": "validsig_base64==",
+        },
+    })
+    assert res["status"] == "InvalidCertificate"
+    await asyncio.sleep(0)
+    sec_calls = [
+        c for c in mock_client.call.call_args_list
+        if c.args and c.args[0] == "SecurityEventNotification"
+    ]
+    assert any(
+        c.args[1]["type"] == "InvalidFirmwareSigningCertificate"
+        for c in sec_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_TC_P_01_CS_unknown_vendor(controller):
+    """TC_P_01_CS: DataTransfer with unknown vendorId → UnknownVendorId."""
+    res = await controller.handle_data_transfer({
+        "vendorId": "org.openchargealliance.Test System",
+        "messageId": "whatever",
+    })
+    assert res["status"] == "UnknownVendorId"
+
+
+@pytest.mark.asyncio
+async def test_TC_N_25_CS_get_log_filename(controller, mock_client):
+    """TC_N_25_CS: GetLogResponse must carry a non-empty filename."""
+    res = await controller.handle_get_log({
+        "requestId": 42, "logType": "DiagnosticsLog",
+        "log": {"remoteLocation": "ftp://logs.example.com/"},
+    })
+    assert res["status"] == "Accepted"
+    assert res.get("filename")
+    assert "DiagnosticsLog" in res["filename"]
+
+
+@pytest.mark.asyncio
+async def test_TC_N_32_CS_clear_no_report(controller, mock_client):
+    """TC_N_32_CS: CustomerInformation with clear=true AND report=false
+    still emits one NotifyCustomerInformation."""
+    controller._auth_cache["TAG_XYZ"] = {
+        "idTokenInfo": {"status": "Accepted"},
+        "stored_at": 0,
+    }
+    res = await controller.handle_customer_information({
+        "requestId": 7,
+        "report": False,
+        "clear": True,
+        "idToken": {"idToken": "TAG_XYZ", "type": "ISO14443"},
+    })
+    assert res["status"] == "Accepted"
+    assert "TAG_XYZ" not in controller._auth_cache
+    await asyncio.sleep(0)
+    notify_calls = [
+        c for c in mock_client.call.call_args_list
+        if c.args and c.args[0] == "NotifyCustomerInformation"
+    ]
+    assert len(notify_calls) >= 1
+    assert notify_calls[-1].args[1]["requestId"] == 7
 
 
 @pytest.mark.asyncio
@@ -858,11 +1027,19 @@ async def test_TC_L_trigger_log_status_notification(controller, mock_client):
 
 @pytest.mark.asyncio
 async def test_TC_M_data_transfer_inbound(controller):
-    """TC_M: DataTransfer (CSMS→CS) — Accepted"""
+    """TC_P_01_CS: DataTransfer (CSMS→CS) — unknown vendorId returns
+    UnknownVendorId; known vendorId returns Accepted."""
     res = await controller.handle_data_transfer({
         "vendorId": "com.example", "messageId": "Ping", "data": "hello"
     })
-    assert res["status"] == "Accepted"
+    assert res["status"] == "UnknownVendorId"
+
+    # Register the vendor to verify the Accepted path still works.
+    controller._supported_data_transfer_vendors["com.example"] = set()
+    res2 = await controller.handle_data_transfer({
+        "vendorId": "com.example", "messageId": "Ping", "data": "hello"
+    })
+    assert res2["status"] == "Accepted"
 
 
 @pytest.mark.asyncio

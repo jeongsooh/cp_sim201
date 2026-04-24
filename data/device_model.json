@@ -22,7 +22,7 @@
     "TxEndedMeasurands": "Energy.Active.Import.Register"
   },
   "HeartbeatCtrlr": {
-    "HeartbeatInterval": "60"
+    "HeartbeatInterval": "1"
   },
   "TxCtrlr": {
     "TxStartPoint": "Authorized,EVConnected",
@@ -71,5 +71,8 @@
     "OrganizationName": "TEST_CORP",
     "CertSigningWaitMinimum": "30",
     "CertSigningRepeatTimes": "3"
+  },
+  "FirmwareCtrlr": {
+    "AllowNewSessionsPendingFirmwareUpdate": "true"
   }
 }

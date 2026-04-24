@@ -1554,8 +1554,14 @@ class ChargingStationController:
         if not self.is_evse_available:
             logger.warning("RequestStartTransaction rejected: EVSE not available")
             return {"status": "Rejected"}
-        if self.transaction_id:
-            logger.warning("RequestStartTransaction rejected: transaction already active")
+        # TC_F_01_CS: "Cable plugin first" — the tx is already Started via
+        # EVConnected TxStartPoint (chargingState=EVConnected, not yet
+        # authorized). The incoming RequestStartTransaction is the
+        # authorization step, not a new-tx request, so accept it.
+        # Reject only when the tx is already authorized (another remote
+        # start during an active authorized session has nothing to do).
+        if self.transaction_id and self.is_authorized:
+            logger.warning("RequestStartTransaction rejected: transaction already authorized")
             return {"status": "Rejected"}
 
         id_token = payload["idToken"]
@@ -1590,6 +1596,20 @@ class ChargingStationController:
         self.is_authorized = True
         self._tx_id_token_value = id_token.get("idToken")
         self._tx_group_id_token_value = None
+        # TC_F_01_CS: tx was already started by cable-plug (CablePluggedIn
+        # trigger, chargingState=EVConnected, waiting for auth). The
+        # remote start authorizes the existing tx — close the relay and
+        # emit Updated(triggerReason=Authorized, idToken) — do NOT start
+        # a second tx.
+        if self.transaction_id:
+            if self.connector_hal.status == "Occupied":
+                self.power_contactor_hal.control_relay("Close")
+            await self._send_tx_updated(
+                "Authorized",
+                id_token=id_token,
+                remote_start_id=remote_start_id,
+            )
+            return
         # §E01.FR.03: TxStartPoint OR-semantics — if Authorized is listed the
         # tx starts immediately with triggerReason=RemoteStart carrying
         # remoteStartId + idToken; otherwise wait for cable plug.
@@ -2190,12 +2210,18 @@ class ChargingStationController:
         trigger_reason: str,
         id_token: Optional[Dict[str, Any]] = None,
         charging_state: Optional[str] = None,
+        remote_start_id: Optional[int] = None,
     ) -> None:
         """Send TransactionEvent(Updated) on an already-started transaction.
 
         chargingState (EVConnected / SuspendedEVSE / SuspendedEV / Charging) is
         mandatory on Updated events for several trigger reasons (TC_B_21_CS —
         CablePluggedIn). Derived from live state if the caller didn't specify.
+
+        TC_F_01_CS: remote_start_id is included in transactionInfo when the
+        tx was authorized by a RequestStartTransaction (cable-plugin-first
+        path) — the Started event carried CablePluggedIn trigger, so the
+        remoteStartId binds to the Updated(Authorized) event instead.
         """
         if not self.transaction_id:
             return
@@ -2208,16 +2234,19 @@ class ChargingStationController:
                 charging_state = "Idle"
         next_seq_no = self._tx_seq_no + 1
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        transaction_info: Dict[str, Any] = {
+            "transactionId": self.transaction_id,
+            "chargingState": charging_state,
+        }
+        if remote_start_id is not None:
+            transaction_info["remoteStartId"] = remote_start_id
         payload: Dict[str, Any] = {
             "eventType": "Updated",
             "timestamp": now_iso,
             "triggerReason": trigger_reason,
             "seqNo": next_seq_no,
             "evse": {"id": self.evse_id, "connectorId": self.connector_id},
-            "transactionInfo": {
-                "transactionId": self.transaction_id,
-                "chargingState": charging_state,
-            },
+            "transactionInfo": transaction_info,
         }
         if id_token is not None:
             payload["idToken"] = id_token

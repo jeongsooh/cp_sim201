@@ -651,22 +651,31 @@ class ChargingStationController:
         return wait_min, random_range, repeat_times
 
     def _tx_retry_config(self):
-        """TC_E_41_CS: return (MessageAttempts, MessageAttemptInterval) for
-        TransactionEvent, read from _INSTANCED_ENTRIES (instance=TransactionEvent).
+        """TC_E_41_CS: return (MessageAttempts, MessageAttemptInterval,
+        MessageTimeout) for TransactionEvent.
+
+        Reads MessageAttempts and MessageAttemptInterval from
+        _INSTANCED_ENTRIES (instance="TransactionEvent") and MessageTimeout
+        from the same store (instance="Default"). OCTT sets these values up
+        in test prep and the §E13 retry schedule uses them directly —
+        interval * n + MessageTimeout between successive transmissions.
         """
         attempts = 3
         interval = 60
+        timeout = 30
         for comp, var, inst, value, _ in _INSTANCED_ENTRIES:
-            if comp != "OCPPCommCtrlr" or inst != "TransactionEvent":
+            if comp != "OCPPCommCtrlr":
                 continue
             try:
-                if var == "MessageAttempts":
+                if inst == "TransactionEvent" and var == "MessageAttempts":
                     attempts = int(value)
-                elif var == "MessageAttemptInterval":
+                elif inst == "TransactionEvent" and var == "MessageAttemptInterval":
                     interval = int(value)
+                elif inst == "Default" and var == "MessageTimeout":
+                    timeout = int(value)
             except (TypeError, ValueError):
                 pass
-        return attempts, interval
+        return attempts, interval, timeout
 
     def _boot_state_message_gate(self, action: str):
         """Return (error_code, desc) to reject the incoming CSMS action, or None to allow.

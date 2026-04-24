@@ -150,22 +150,27 @@ class OCPPClient:
         self._retry_config_provider = provider
 
     def set_tx_retry_config_provider(
-        self, provider: Optional[Callable[[], Tuple[int, int]]]
+        self, provider: Optional[Callable[[], Tuple[int, int, int]]]
     ) -> None:
-        """TC_E_41_CS: provider returns (MessageAttempts, MessageAttemptInterval)
-        for TransactionEvent — read from OCPPCommCtrlr instance=TransactionEvent.
+        """TC_E_41_CS: provider returns (MessageAttempts, MessageAttemptInterval,
+        MessageTimeout) for TransactionEvent — read from OCPPCommCtrlr
+        instance=TransactionEvent / instance=Default.
         """
         self._tx_retry_config_provider = provider
 
-    def _tx_retry_config(self) -> Tuple[int, int]:
+    def _tx_retry_config(self) -> Tuple[int, int, int]:
         if self._tx_retry_config_provider is not None:
             try:
-                return self._tx_retry_config_provider()
+                res = self._tx_retry_config_provider()
+                if len(res) == 2:
+                    # Backwards-compat: old provider only returned 2.
+                    return (res[0], res[1], 30)
+                return res
             except Exception as e:
                 logger.warning(
                     f"tx_retry_config_provider failed, using defaults: {e}"
                 )
-        return (3, 60)
+        return (3, 60, 30)
 
     def set_connection_failure_handler(
         self, handler: Optional[Callable[[int], None]]
@@ -449,11 +454,18 @@ class OCPPClient:
             raise WaitQueueError(f"Client payload validation failed: {e}")
 
         # TC_E_41/E_42/E_50/E_51_CS: TransactionEvent gets its own §E13 retry
-        # schedule (MessageAttempts + MessageAttemptInterval). The CS resends
-        # on the same connection without closing the ws — OCTT validates that
-        # the same message is sent the configured number of times.
+        # schedule (MessageAttempts + MessageAttemptInterval + MessageTimeout).
+        # The CS resends on the same connection without closing the ws — OCTT
+        # validates that the same message is sent the configured number of
+        # times, spaced by (MessageAttemptInterval * n) + MessageTimeout.
         is_tx_event = (action == "TransactionEvent")
-        tx_attempts, tx_interval = self._tx_retry_config() if is_tx_event else (1, 0)
+        if is_tx_event:
+            tx_attempts, tx_interval, tx_timeout = self._tx_retry_config()
+            # Override the per-attempt timeout so OCTT's expected wait schedule
+            # (sum-to-next-transmission = MessageTimeout + interval*n) matches.
+            timeout = float(tx_timeout)
+        else:
+            tx_attempts, tx_interval = (1, 0)
         attempt_idx = 0
         while True:
             async with self._call_lock:

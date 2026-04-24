@@ -258,6 +258,12 @@ class ChargingStationController:
         self._ev_connect_timeout_task: Optional[asyncio.Task] = None
         self._pending_reset: bool = False
         self._pending_reset_type: str = "Immediate"
+        # TC_G_11/14/17_CS: ChangeAvailability(Inoperative) mid-tx returns
+        # "Scheduled"; the switch must take effect once the tx ends. We
+        # remember the requested scope so the deferred apply can emit the
+        # right StatusNotification (Unavailable) after the cable is
+        # unplugged.
+        self._pending_inoperative: bool = False
         # Whether the Reset was answered with "Scheduled" (only true when
         # OnIdle deferred the reboot due to an active transaction). Drives
         # the BootNotification reason: ScheduledReset vs RemoteReset.
@@ -1690,8 +1696,14 @@ class ChargingStationController:
         )
         new_available = (status != "Inoperative")
         if not new_available and self.transaction_id:
-            # TC_G_11/14/17: can't switch to Inoperative mid-tx; defer.
+            # TC_G_11/14/17: can't switch to Inoperative mid-tx; defer
+            # and remember so stop_transaction can apply it + emit
+            # StatusNotification(Unavailable) when the tx ends.
+            self._pending_inoperative = True
             return {"status": "Scheduled"}
+        # A plain Operative cancels any pending Inoperative.
+        if new_available:
+            self._pending_inoperative = False
         # Idempotent: if already in the requested state, still respond
         # Accepted and re-emit StatusNotification per OCPP guidance.
         self.is_evse_available = new_available
@@ -2550,9 +2562,14 @@ class ChargingStationController:
             else:
                 logger.info("Cable unplugged but StopTxOnEVSideDisconnect=false — transaction continues.")
 
+        # TC_G_11/14/17_CS: if the EVSE was scheduled Inoperative during
+        # the tx, stop_transaction has now committed it — report the
+        # connector as Unavailable on unplug, not Available.
+        connector_status = "Available" if self.is_evse_available else "Unavailable"
+        self.connector_hal.status = connector_status
         payload = {
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "connectorStatus": "Available",
+            "connectorStatus": connector_status,
             "evseId": self.evse_id,
             "connectorId": self.connector_id
         }
@@ -2848,6 +2865,19 @@ class ChargingStationController:
             # Re-apply availability if it was scheduled as Inoperative
             if not self.is_evse_available:
                 self.device_model["EVSE"]["AvailabilityState"] = ("Inoperative", "ReadOnly")
+
+            # TC_G_11/14/17_CS: a ChangeAvailability(Inoperative) received
+            # during the tx returned "Scheduled"; now that the tx ended,
+            # commit the state so the pending-unplug StatusNotification
+            # reports Unavailable.
+            if self._pending_inoperative:
+                self.is_evse_available = False
+                self.device_model["EVSE"]["AvailabilityState"] = (
+                    "Inoperative", "ReadOnly",
+                )
+                save_device_model(self.device_model)
+                save_admin_state({"is_evse_available": False})
+                self._pending_inoperative = False
 
             # TC_B_21_CS: a Reset(OnIdle) received during the transaction
             # returned "Scheduled"; fire the deferred reboot only once the

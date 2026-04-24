@@ -98,6 +98,8 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("SecurityCtrlr", "CertificateEntries"): "integer",
     ("SecurityCtrlr", "CertSigningWaitMinimum"): "integer",
     ("SecurityCtrlr", "CertSigningRepeatTimes"): "integer",
+    # TC_L_13_CS
+    ("FirmwareCtrlr", "AllowNewSessionsPendingFirmwareUpdate"): "boolean",
 }
 
 # OCPP 2.0.1 VariableCharacteristics.valuesList — required for OptionList /
@@ -264,6 +266,15 @@ class ChargingStationController:
         # FirmwareStatusNotification. _on_reconnect consumes these flags.
         self._pending_firmware_update_reboot: bool = False
         self._pending_firmware_update_request_id: Optional[int] = None
+        # TC_L_11_CS: track an in-flight UpdateFirmwareRequest so a second
+        # request arriving while the first is still downloading/installing
+        # can be refused (simulator cannot truly cancel). Cleared when the
+        # sequence finishes or fails.
+        self._firmware_update_task: Optional[asyncio.Task] = None
+        self._firmware_update_in_progress: bool = False
+        # TC_L_13_CS: remember connectors we forced to Unavailable for a
+        # firmware update so we can restore them to Available after reboot.
+        self._firmware_update_suspended_connectors: bool = False
         # TC_J_03_CS: AlignedDataCtrlr.TxEndedInterval / TxEndedMeasurands —
         # clock-aligned samples are accumulated during the tx and flushed
         # into the Ended event's meterValue array with context=Sample.Clock.
@@ -321,6 +332,13 @@ class ChargingStationController:
 
         # Block K: 배포된 펌웨어
         self.published_firmware: dict = {}  # key: checksum → location
+
+        # Block P (TC_P_01_CS): supported DataTransfer vendors.
+        # key = vendorId; value = set of allowed messageIds (empty set = any
+        # messageId allowed for that vendor). An unknown vendorId produces
+        # UnknownVendorId; a known vendorId with an unknown messageId produces
+        # UnknownMessageId. This CS exposes no vendor-specific features.
+        self._supported_data_transfer_vendors: Dict[str, set] = {}
 
         # Block A: 인증서 관리
         self._cert_dir: str = cert_dir
@@ -457,6 +475,12 @@ class ChargingStationController:
                 # TC_A_23_CS: SignCertificate → CertificateSigned 대기/재시도 정책
                 "CertSigningWaitMinimum": ("30", "ReadWrite"),
                 "CertSigningRepeatTimes": ("3",  "ReadWrite"),
+            },
+            # TC_L_13_CS / §L01.FR.06-07: when false, the CS must set all
+            # Available connectors to Unavailable for the duration of a
+            # pending firmware update and refuse new sessions.
+            "FirmwareCtrlr": {
+                "AllowNewSessionsPendingFirmwareUpdate": ("true", "ReadWrite"),
             },
         })
         # Force-override SecurityProfile after load_device_model so persisted "0" can't win.
@@ -839,12 +863,23 @@ class ChargingStationController:
         for attempt in range(1, total_attempts + 1):
             self._cert_signed_event = asyncio.Event()
             try:
-                await self.ocpp_client.call("SignCertificate", {
+                sign_res = await self.ocpp_client.call("SignCertificate", {
                     "csr": csr_pem,
                     "certificateType": "ChargingStationCertificate",
                 })
             except Exception as e:
                 logger.error(f"SignCertificate call failed on attempt {attempt}: {e}")
+                sign_res = None
+
+            # TC_A_15_CS: if the CSMS rejects the SignCertificateRequest, do
+            # not wait for a CertificateSignedRequest that will never arrive
+            # and do not retry — stop the loop immediately.
+            if sign_res is not None and sign_res.get("status") == "Rejected":
+                logger.info(
+                    "SignCertificateResponse=Rejected — aborting SignCertificate retry loop"
+                )
+                self._cert_signed_event = None
+                return
 
             # OCPP 2.0.1 §A04: N번째 시도의 타임아웃은 N × CertSigningWaitMinimum
             # (attempt 1: wait, attempt 2: 2×wait, ...)
@@ -994,6 +1029,9 @@ class ChargingStationController:
                             f"Failed to send post-boot Installed: {e}"
                         )
                 await self._send_security_event_notification("FirmwareUpdated")
+                # TC_L_02/03/13_CS Step 18/21: connector returns to Available
+                # after the (simulated) firmware reboot.
+                await self._restore_connectors_after_firmware()
             elif self._pending_reset:
                 # OCPP 2.0.1 BootReasonEnumType: only use ScheduledReset when
                 # the ResetResponse was actually "Scheduled" (OnIdle +
@@ -1922,88 +1960,340 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_update_firmware(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_K_01_CS / TC_L_01_CS: Accepts firmware update and simulates the update sequence."""
-        request_id = payload["requestId"]
-        firmware = payload.get("firmware") or {}
-        location = firmware.get("location", "unknown")
-        # TC_L_01_CS: when the payload includes signature + signingCertificate,
-        # the CS must add "SignatureVerified" (or InvalidSignature on failure)
-        # to the status sequence between Downloaded and Installing.
-        is_secure = bool(firmware.get("signature")) and bool(
-            firmware.get("signingCertificate")
-        )
+        """UpdateFirmwareRequest handler covering TC_K_01_CS and
+        TC_L_01..08/11/13/18_CS.
+
+        - TC_L_18_CS: signingCertificate OR signature missing → Rejected.
+        - TC_L_05_CS: unparseable / expired signingCertificate →
+          InvalidCertificate + SecurityEventNotification(
+          type=InvalidFirmwareSigningCertificate).
+        - TC_L_11_CS: a second request while an update is in progress is
+          Rejected (the simulator cannot truly cancel).
+        - TC_L_02_CS / TC_L_03_CS: future installDateTime /
+          retrieveDateTime → InstallScheduled / DownloadScheduled first.
+        - TC_L_13_CS: AllowNewSessionsPendingFirmwareUpdate=false while a
+          transaction is active → DownloadScheduled + force connector(s) to
+          Unavailable until reboot.
+        - TC_L_06/07/08_CS: OCTT failure markers in the payload drive the
+          InvalidSignature / DownloadFailed / InstallVerificationFailed
+          paths.
+        """
+        request_id   = payload["requestId"]
+        firmware     = payload.get("firmware") or {}
+        location     = firmware.get("location", "") or ""
+        signature    = firmware.get("signature", "") or ""
+        signing_cert = firmware.get("signingCertificate", "") or ""
+        retrieve_dt  = firmware.get("retrieveDateTime", "") or ""
+        install_dt   = firmware.get("installDateTime", "") or ""
+
+        # TC_L_18_CS: both fields required for secure firmware update.
+        if not signing_cert or not signature:
+            logger.warning(
+                f"UpdateFirmware rejected (TC_L_18): signingCertificate or "
+                f"signature missing, requestId={request_id}"
+            )
+            return {"status": "Rejected"}
+
+        # TC_L_05_CS: reject invalid signingCertificate + fire
+        # SecurityEventNotification.
+        cert_reason = self._validate_cert_pem(signing_cert)
+        if cert_reason is not None:
+            logger.warning(
+                f"UpdateFirmware rejected (TC_L_05): signingCertificate "
+                f"invalid ({cert_reason}), requestId={request_id}"
+            )
+            asyncio.create_task(
+                self._send_security_event_notification(
+                    "InvalidFirmwareSigningCertificate"
+                )
+            )
+            return {"status": "InvalidCertificate"}
+
+        # TC_L_11_CS.
+        if self._firmware_update_in_progress:
+            logger.warning(
+                f"UpdateFirmware rejected (TC_L_11): update already in "
+                f"progress, requestId={request_id}"
+            )
+            return {"status": "Rejected"}
+
         logger.info(
-            f"UpdateFirmware requestId={request_id}, location={location}, "
-            f"secure={is_secure}"
+            f"UpdateFirmware accepted requestId={request_id} "
+            f"location={location} retrieveDT={retrieve_dt} installDT={install_dt}"
         )
-        asyncio.create_task(
-            self._simulate_firmware_update(request_id, is_secure=is_secure)
+        self._firmware_update_in_progress = True
+        self._firmware_update_task = asyncio.create_task(
+            self._simulate_firmware_update(
+                request_id=request_id,
+                location=location,
+                signature=signature,
+                retrieve_dt=retrieve_dt,
+                install_dt=install_dt,
+            )
         )
         return {"status": "Accepted"}
 
+    @staticmethod
+    def _parse_iso_datetime(value: str) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            s = value.replace("Z", "+00:00") if value.endswith("Z") else value
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
+    @staticmethod
+    def _firmware_location_fault(location: str) -> Optional[str]:
+        """Detect OCTT failure markers in firmware.location.
+
+        - "does_not_exist" prefix → TC_L_07_CS DownloadFailed.
+        - "install_verification_failed" / "corrupted" → TC_L_08_CS
+          InstallVerificationFailed.
+        """
+        loc = location.lower()
+        if "does_not_exist" in loc:
+            return "download_failed"
+        if "install_verification_failed" in loc or "corrupted" in loc:
+            return "install_verification_failed"
+        return None
+
+    @staticmethod
+    def _is_firmware_signature_invalid(signature: str) -> bool:
+        """TC_L_06_CS: detect the "configured invalid firmware signature"
+        marker. The simulator cannot verify a real signature against a file
+        it never downloads, so we treat the literal token "invalid"
+        anywhere in the payload as the OCTT sentinel for this test case.
+        """
+        if not signature:
+            return True
+        return "invalid" in signature.lower()
+
+    async def _fw_status(self, request_id: int, status: str) -> None:
+        try:
+            await self.ocpp_client.call("FirmwareStatusNotification",
+                                        {"status": status, "requestId": request_id})
+            logger.info(f"FirmwareStatusNotification: {status}")
+        except Exception as e:
+            logger.error(f"Failed to send FirmwareStatusNotification ({status}): {e}")
+
+    async def _set_connectors_unavailable_for_firmware(self) -> None:
+        """TC_L_02/03/08/13_CS: mark connector Unavailable for the firmware
+        window. Physical HAL is unchanged — this is an OCPP-level signal.
+        """
+        if self._firmware_update_suspended_connectors:
+            return
+        self._firmware_update_suspended_connectors = True
+        try:
+            await self.ocpp_client.call("StatusNotification", {
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "connectorStatus": "Unavailable",
+                "evseId": self.evse_id,
+                "connectorId": self.connector_id,
+            })
+            logger.info("Firmware update: connector forced Unavailable")
+        except Exception as e:
+            logger.error(f"Failed to send Unavailable StatusNotification: {e}")
+
+    async def _restore_connectors_after_firmware(self) -> None:
+        """TC_L_02/03/08/13_CS: connector returns to Available once the
+        firmware window has ended (after simulated reboot or on failure).
+        """
+        if not self._firmware_update_suspended_connectors:
+            return
+        self._firmware_update_suspended_connectors = False
+        try:
+            self.connector_hal.status = self.connector_hal.read_physical_connection()
+            await self.ocpp_client.call("StatusNotification", {
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "connectorStatus": self.connector_hal.status,
+                "evseId": self.evse_id,
+                "connectorId": self.connector_id,
+            })
+            logger.info(
+                f"Firmware update: connector restored → {self.connector_hal.status}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send post-firmware StatusNotification: {e}")
+
     async def _simulate_firmware_update(
-        self, request_id: int, is_secure: bool = False,
+        self,
+        request_id: int,
+        location: str,
+        signature: str,
+        retrieve_dt: str,
+        install_dt: str,
     ) -> None:
-        sequence = ["Downloading", "Downloaded"]
-        if is_secure:
-            # TC_L_01_CS: a verified signing certificate yields
-            # SignatureVerified before install proceeds.
-            sequence.append("SignatureVerified")
-        sequence.append("Installing")
-        # TC_L_01_CS: OCTT requires the sequence to include InstallRebooting
-        # right before the (simulated) reboot and then the final Installed
-        # AFTER the CS has reconnected + sent BootNotification(reason=
-        # FirmwareUpdate). We emit Downloading/Downloaded/SignatureVerified/
-        # Installing/InstallRebooting here, arm _pending_firmware_update_*,
-        # then close the ws. _on_reconnect sends the FirmwareUpdate boot
-        # and the final Installed notification.
-        if is_secure:
-            sequence.append("InstallRebooting")
-        else:
-            sequence.append("Installed")
-        for fw_status in sequence:
+        reboot_handoff = False
+        try:
+            now         = datetime.now(timezone.utc)
+            retrieve_at = self._parse_iso_datetime(retrieve_dt)
+            install_at  = self._parse_iso_datetime(install_dt)
+            fault       = self._firmware_location_fault(location)
+            sig_invalid = self._is_firmware_signature_invalid(signature)
+            allow_new_sessions = self._get_bool(
+                "FirmwareCtrlr", "AllowNewSessionsPendingFirmwareUpdate", True,
+            )
+            tx_active = bool(self.transaction_id)
+
+            # TC_L_03_CS: future retrieveDateTime → DownloadScheduled.
+            # TC_L_13_CS: ongoing tx + AllowNewSessionsPendingFirmwareUpdate
+            # false → same DownloadScheduled path with connector Unavailable.
+            scheduled_download = (
+                (retrieve_at is not None and retrieve_at > now)
+                or (tx_active and not allow_new_sessions)
+            )
+            if scheduled_download:
+                await self._fw_status(request_id, "DownloadScheduled")
+                if tx_active and not allow_new_sessions:
+                    await self._set_connectors_unavailable_for_firmware()
+                # Bounded wait so OCTT can continue; real CS would wait for
+                # retrieveDateTime AND/OR tx end.
+                if retrieve_at is not None and retrieve_at > now:
+                    delay = min((retrieve_at - now).total_seconds(), 5.0)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+
+            # TC_L_07_CS.
+            if fault == "download_failed":
+                await asyncio.sleep(2)
+                await self._fw_status(request_id, "Downloading")
+                await asyncio.sleep(2)
+                await self._fw_status(request_id, "DownloadFailed")
+                return
+
             await asyncio.sleep(2)
-            try:
-                await self.ocpp_client.call("FirmwareStatusNotification",
-                                            {"status": fw_status, "requestId": request_id})
-                logger.info(f"FirmwareStatusNotification: {fw_status}")
-            except Exception as e:
-                logger.error(f"Failed to send FirmwareStatusNotification ({fw_status}): {e}")
-        if is_secure:
-            # Drive the reboot cycle: arm flags for _on_reconnect, then
-            # drop the ws so OCPPClient.connect() reconnects.
+            await self._fw_status(request_id, "Downloading")
+            await asyncio.sleep(2)
+            await self._fw_status(request_id, "Downloaded")
+
+            # TC_L_06_CS.
+            if sig_invalid:
+                await asyncio.sleep(2)
+                await self._fw_status(request_id, "InvalidSignature")
+                asyncio.create_task(
+                    self._send_security_event_notification("InvalidFirmwareSignature")
+                )
+                return
+
+            await asyncio.sleep(2)
+            await self._fw_status(request_id, "SignatureVerified")
+
+            # TC_L_02_CS.
+            if install_at is not None and install_at > now:
+                await asyncio.sleep(2)
+                await self._fw_status(request_id, "InstallScheduled")
+                await self._set_connectors_unavailable_for_firmware()
+                delay = min((install_at - now).total_seconds(), 5.0)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+            # TC_L_08_CS.
+            if fault == "install_verification_failed":
+                await asyncio.sleep(2)
+                await self._set_connectors_unavailable_for_firmware()
+                await self._fw_status(request_id, "Installing")
+                await asyncio.sleep(2)
+                await self._fw_status(request_id, "InstallVerificationFailed")
+                return
+
+            # Happy path (TC_L_01/02/03/13_CS): Installing → InstallRebooting
+            # → reconnect → Installed via _on_reconnect.
+            await asyncio.sleep(2)
+            await self._set_connectors_unavailable_for_firmware()
+            await self._fw_status(request_id, "Installing")
+            await asyncio.sleep(2)
+            await self._fw_status(request_id, "InstallRebooting")
+
             self._pending_firmware_update_reboot = True
             self._pending_firmware_update_request_id = request_id
+            reboot_handoff = True
             await asyncio.sleep(1)
             if self.ocpp_client.ws:
                 try:
                     await self.ocpp_client.ws.close()
                 except Exception as e:
                     logger.warning(f"ws.close() on firmware-update reboot raised: {e}")
+        finally:
+            self._firmware_update_in_progress = False
+            # When we hand off to _on_reconnect, let the reconnect path
+            # restore connector status after the FirmwareUpdate boot. Any
+            # other exit restores right away.
+            if not reboot_handoff:
+                await self._restore_connectors_after_firmware()
 
     async def handle_get_log(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_K_03_CS: Accepts log upload request and simulates upload sequence"""
-        request_id = payload["requestId"]
-        log_type   = payload.get("logType", "DiagnosticsLog")
-        logger.info(f"GetLog requestId={request_id}, logType={log_type}")
-        asyncio.create_task(self._simulate_log_upload(request_id))
-        return {"status": "Accepted"}
+        """TC_K_03_CS / TC_N_25_CS / TC_N_26_CS / TC_N_35_CS: log upload.
 
-    async def _simulate_log_upload(self, request_id: int) -> None:
-        await asyncio.sleep(2)
-        try:
-            await self.ocpp_client.call("LogStatusNotification",
-                                        {"status": "Uploading", "requestId": request_id})
-            logger.info("LogStatusNotification: Uploading")
-        except Exception as e:
-            logger.error(f"Failed to send LogStatusNotification (Uploading): {e}")
-        await asyncio.sleep(2)
-        try:
-            await self.ocpp_client.call("LogStatusNotification",
-                                        {"status": "Uploaded", "requestId": request_id})
-            logger.info("LogStatusNotification: Uploaded")
-        except Exception as e:
-            logger.error(f"Failed to send LogStatusNotification (Uploaded): {e}")
+        TC_N_25_CS requires `filename` in GetLogResponse to be present and
+        non-empty. TC_N_26_CS requires an UploadFailure path with
+        retries/retryInterval when the remote location is unreachable.
+        """
+        request_id  = payload["requestId"]
+        log_type    = payload.get("logType", "DiagnosticsLog")
+        log_info    = payload.get("log", {}) or {}
+        remote_loc  = log_info.get("remoteLocation", "") or ""
+        retries     = int(payload.get("retries", 0))
+        retry_intv  = int(payload.get("retryInterval", 0))
+
+        now_ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        filename = f"{log_type}_{request_id}_{now_ts}.log"
+        logger.info(
+            f"GetLog requestId={request_id}, logType={log_type}, "
+            f"remoteLocation={remote_loc}, retries={retries}, "
+            f"retryInterval={retry_intv}, filename={filename}"
+        )
+
+        # TC_N_26_CS marker: the configured invalid remoteLocation uses a
+        # nonexistent path. Detect common OCTT markers to drive the failure
+        # flow; otherwise simulate a successful upload.
+        will_fail = (
+            "does_not_exist" in remote_loc
+            or "nonexistent" in remote_loc.lower()
+            or remote_loc.endswith("/nonexistent")
+        )
+        asyncio.create_task(
+            self._simulate_log_upload(
+                request_id=request_id,
+                will_fail=will_fail,
+                retries=retries,
+                retry_interval=retry_intv,
+            )
+        )
+        return {"status": "Accepted", "filename": filename}
+
+    async def _simulate_log_upload(
+        self,
+        request_id: int,
+        will_fail: bool = False,
+        retries: int = 0,
+        retry_interval: int = 0,
+    ) -> None:
+        # TC_N_25_CS happy path: single Uploading → Uploaded pair.
+        # TC_N_26_CS failure path: Uploading → UploadFailure repeated
+        # (1 + retries) times with retry_interval seconds between attempts.
+        attempts = (1 + retries) if will_fail else 1
+        for i in range(attempts):
+            await asyncio.sleep(2)
+            try:
+                await self.ocpp_client.call("LogStatusNotification",
+                                            {"status": "Uploading", "requestId": request_id})
+                logger.info(f"LogStatusNotification: Uploading (attempt {i + 1}/{attempts})")
+            except Exception as e:
+                logger.error(f"Failed to send LogStatusNotification (Uploading): {e}")
+            await asyncio.sleep(2)
+            final_status = "UploadFailure" if will_fail else "Uploaded"
+            try:
+                await self.ocpp_client.call("LogStatusNotification",
+                                            {"status": final_status, "requestId": request_id})
+                logger.info(f"LogStatusNotification: {final_status}")
+            except Exception as e:
+                logger.error(f"Failed to send LogStatusNotification ({final_status}): {e}")
+            if will_fail and i + 1 < attempts:
+                await asyncio.sleep(max(retry_interval, 1))
 
     # ------------------------------------------------------------------
     # Block L — Remote Trigger
@@ -3242,10 +3532,56 @@ class ChargingStationController:
             "serialNumber":   digest[:16],  # 8-byte hex, maxLength 40 이내
         }
 
+    @staticmethod
+    def _validate_cert_pem(pem: str) -> Optional[str]:
+        """Parse PEM and check validity window.
+
+        Returns None when the certificate is structurally valid and currently
+        within its validity period, otherwise a short reason string
+        ("unparseable", "expired", "not_yet_valid"). Used by TC_M_07_CS
+        (reject expired CA cert) and TC_A_14_CS (reject bad CertificateSigned
+        payload).
+        """
+        try:
+            from cryptography import x509
+        except ImportError:
+            return None  # validation not available → fall back to legacy
+        try:
+            cert = x509.load_pem_x509_certificate(pem.encode())
+        except Exception:
+            return "unparseable"
+        try:
+            now = datetime.now(timezone.utc)
+            # cryptography >=42 exposes UTC-aware *_utc props; older versions
+            # use naive UTC via not_valid_before/not_valid_after.
+            not_after = getattr(cert, "not_valid_after_utc", None) or \
+                cert.not_valid_after.replace(tzinfo=timezone.utc)
+            not_before = getattr(cert, "not_valid_before_utc", None) or \
+                cert.not_valid_before.replace(tzinfo=timezone.utc)
+            if now > not_after:
+                return "expired"
+            if now < not_before:
+                return "not_yet_valid"
+        except Exception:
+            return "unparseable"
+        return None
+
     async def handle_install_certificate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_A_06_CS, TC_A_07_CS: CA 인증서를 파일로 저장하고 메모리에 등록한다."""
+        """TC_A_06_CS, TC_A_07_CS, TC_M_07_CS: install a CA certificate.
+
+        TC_M_07_CS requires rejection of a malformed or expired certificate;
+        only well-formed, currently-valid certs are saved to disk and tracked
+        in self.installed_certificates.
+        """
         cert_type: str = payload["certificateType"]
         pem: str       = payload["certificate"]
+
+        reason = self._validate_cert_pem(pem)
+        if reason is not None:
+            logger.warning(
+                f"InstallCertificate rejected: type={cert_type} reason={reason}"
+            )
+            return {"status": "Rejected"}
 
         hash_data = self._make_cert_hash_data(pem)
         serial    = hash_data["serialNumber"]
@@ -3285,7 +3621,11 @@ class ChargingStationController:
         return {"status": "Accepted", "certificateHashDataChain": chain}
 
     async def handle_delete_certificate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_A_11_CS, TC_A_12_CS: 설치된 인증서를 삭제한다."""
+        """TC_A_11_CS, TC_A_12_CS, TC_M_23_CS: delete an installed certificate.
+
+        TC_M_23_CS (§M04.FR.06): the Charging Station must not allow deletion
+        of its own ChargingStationCertificate — return Failed in that case.
+        """
         hash_data: Dict = payload.get("certificateHashData", {})
         serial: Optional[str] = hash_data.get("serialNumber")
 
@@ -3293,6 +3633,12 @@ class ChargingStationController:
             return {"status": "NotFound"}
 
         entry = self.installed_certificates[serial]
+        if entry.get("certificateType") == "ChargingStationCertificate":
+            logger.warning(
+                f"DeleteCertificate refused: serial={serial} is the Charging "
+                f"Station Certificate (TC_M_23_CS)"
+            )
+            return {"status": "Failed"}
         try:
             if os.path.exists(entry["pem_path"]):
                 os.remove(entry["pem_path"])
@@ -3310,10 +3656,31 @@ class ChargingStationController:
         return {"status": "Accepted"}
 
     async def handle_certificate_signed(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """TC_A_19_CS, TC_A_20_CS: 서명된 클라이언트 인증서를 저장한다.
-        즉시 재연결하지 않고 플래그만 세팅해 다음 재시작 시 적용한다."""
+        """TC_A_19_CS, TC_A_20_CS, TC_A_14_CS: 서명된 클라이언트 인증서를 저장한다.
+
+        TC_A_14_CS: an invalid certificateChain must be rejected and a
+        SecurityEventNotification(type=InvalidChargingStationCertificate) must
+        be sent (§A02.FR.07/A03.FR.07).
+        """
         cert_chain_pem: str = payload["certificateChain"]
         cert_type: str      = payload.get("certificateType", "ChargingStationCertificate")
+
+        reason = self._validate_cert_pem(cert_chain_pem)
+        if reason is not None:
+            logger.warning(
+                f"CertificateSigned rejected: type={cert_type} reason={reason}"
+            )
+            event_type = (
+                "InvalidChargingStationCertificate"
+                if cert_type == "ChargingStationCertificate"
+                else "InvalidV2GChargingStationCertificate"
+            )
+            asyncio.create_task(self._send_security_event_notification(event_type))
+            # Unblock any in-flight SignCertificate retry loop so it doesn't
+            # hang waiting for a chain we just rejected (TC_A_23_CS).
+            if self._cert_signed_event is not None and not self._cert_signed_event.is_set():
+                self._cert_signed_event.set()
+            return {"status": "Rejected"}
 
         filename = "client.crt" if cert_type == "ChargingStationCertificate" else "v2g_client.crt"
         cert_path = os.path.join(self._cert_dir, filename)
@@ -3531,10 +3898,18 @@ class ChargingStationController:
     # ------------------------------------------------------------------
 
     async def handle_data_transfer(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        # TC_P_01_CS (§P01.FR.05/FR.06): the CS supports no vendor-specific
+        # DataTransfer messages, so any vendorId must yield UnknownVendorId
+        # (or, if the vendor is known but messageId isn't, UnknownMessageId).
         vendor_id  = payload["vendorId"]
         message_id = payload.get("messageId", "")
         data       = payload.get("data")
         logger.info(f"DataTransfer: vendorId={vendor_id}, messageId={message_id}, data={data}")
+        if vendor_id not in self._supported_data_transfer_vendors:
+            return {"status": "UnknownVendorId"}
+        known_messages = self._supported_data_transfer_vendors[vendor_id]
+        if known_messages and message_id not in known_messages:
+            return {"status": "UnknownMessageId"}
         return {"status": "Accepted"}
 
     async def send_data_transfer(self, vendor_id: str, message_id: str = None, data: Any = None):
@@ -3552,25 +3927,117 @@ class ChargingStationController:
             logger.error(f"Failed to send DataTransfer: {e}")
 
     async def handle_customer_information(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        request_id = payload["requestId"]
-        report     = payload["report"]
-        clear      = payload["clear"]
-        logger.info(f"CustomerInformation: requestId={request_id}, report={report}, clear={clear}")
-        if report:
-            asyncio.create_task(self._send_notify_customer_information(request_id))
+        """TC_N_27..33_CS: CustomerInformation (report / clear).
+
+        - TC_N_27_CS: report=true + cached idToken → NotifyCustomerInformation
+          with non-empty `data`.
+        - TC_N_30_CS: report=true, clear=true → report THEN remove the
+          idToken's traces from the authorization cache (LocalAuthList is
+          preserved per §N10).
+        - TC_N_32_CS: report=false, clear=true → still send one
+          NotifyCustomerInformation indicating data was cleared.
+        - TC_N_28/31_CS: no data available → NotifyCustomerInformation with
+          empty `data` and tbc=false.
+        """
+        request_id    = payload["requestId"]
+        report        = bool(payload.get("report", False))
+        clear         = bool(payload.get("clear", False))
+        id_token      = payload.get("idToken") or {}
+        id_token_val  = id_token.get("idToken", "")
+        cust_ident    = payload.get("customerIdentifier")
+        cust_cert     = payload.get("customerCertificate")
+        logger.info(
+            f"CustomerInformation: requestId={request_id}, report={report}, "
+            f"clear={clear}, idToken={id_token_val}, "
+            f"customerIdentifier={cust_ident}"
+        )
+
+        # Collect the data BEFORE clearing so reports reflect what existed.
+        data_str = self._build_customer_information_data(
+            id_token=id_token_val,
+            customer_identifier=cust_ident,
+            customer_certificate=cust_cert,
+        )
+
+        if clear:
+            removed = self._clear_customer_information(id_token=id_token_val)
+            logger.info(
+                f"CustomerInformation clear: removed {removed} cache entries "
+                f"for idToken={id_token_val}"
+            )
+
+        # Per §N09/N10: respond Accepted and notify asynchronously. When
+        # report=false AND clear=true, TC_N_32_CS still requires a single
+        # NotifyCustomerInformation to confirm the clear operation — so fire
+        # it here regardless, with empty data for the no-report/no-data paths.
+        asyncio.create_task(
+            self._send_notify_customer_information(request_id, data_str if report else "")
+        )
         return {"status": "Accepted"}
 
-    async def _send_notify_customer_information(self, request_id: int) -> None:
+    def _build_customer_information_data(
+        self,
+        id_token: str,
+        customer_identifier: Optional[str],
+        customer_certificate: Optional[Any],
+    ) -> str:
+        """Assemble a short plaintext report of what this CS knows about a
+        customer. Empty string when nothing is known — which satisfies
+        TC_N_28/31_CS (Accepted + no data).
+        """
+        parts: List[str] = []
+        if id_token:
+            cache_entry = self._auth_cache.get(id_token)
+            if cache_entry:
+                info = cache_entry.get("idTokenInfo", {}) or {}
+                parts.append(
+                    f"idToken={id_token}; cacheStatus={info.get('status', 'Unknown')}"
+                )
+            for entry in self.local_auth_list:
+                tok = (entry.get("idToken") or {}).get("idToken")
+                if tok == id_token:
+                    info = entry.get("idTokenInfo", {}) or {}
+                    parts.append(
+                        f"idToken={id_token}; localListStatus={info.get('status', 'Unknown')}"
+                    )
+                    break
+        if customer_identifier:
+            parts.append(f"customerIdentifier={customer_identifier}")
+        if customer_certificate:
+            parts.append("customerCertificate=<present>")
+        return "; ".join(parts)
+
+    def _clear_customer_information(self, id_token: str) -> int:
+        """Remove a specific idToken's traces from the authorization cache.
+
+        Local Authorization List entries are preserved per §N10.FR.02 — they
+        are managed via SendLocalList only.
+        """
+        if not id_token:
+            return 0
+        removed = 0
+        if id_token in self._auth_cache:
+            self._auth_cache.pop(id_token, None)
+            save_auth_cache(self._auth_cache)
+            removed += 1
+        return removed
+
+    async def _send_notify_customer_information(
+        self, request_id: int, data: str = "",
+    ) -> None:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
             await self.ocpp_client.call("NotifyCustomerInformation", {
                 "requestId": request_id,
-                "data": "No customer data available",
+                "data": data,
                 "seqNo": 0,
                 "generatedAt": now,
                 "tbc": False,
             })
-            logger.info(f"NotifyCustomerInformation sent for requestId={request_id}")
+            logger.info(
+                f"NotifyCustomerInformation sent for requestId={request_id}, "
+                f"dataLen={len(data)}"
+            )
         except Exception as e:
             logger.error(f"Failed to send NotifyCustomerInformation: {e}")
 

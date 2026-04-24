@@ -1807,13 +1807,19 @@ class ChargingStationController:
                 "AlignedDataCtrlr", "Measurands",
                 "Energy.Active.Import.Register",
             )
+        sampled = self._build_sampled_values(
+            measurands, meter_data, context, self.meter_value,
+        )
+        # TC_J_03_CS: OCTT may set measurands="" to disable sampling. The
+        # MeterValuesRequest schema forbids empty sampledValue (minItems=1)
+        # AND requires meterValue itself, so we have nothing to send.
+        if not sampled:
+            return
         payload = {
             "evseId": evse_id,
             "meterValue": [{
                 "timestamp": ts_iso,
-                "sampledValue": self._build_sampled_values(
-                    measurands, meter_data, context, self.meter_value,
-                ),
+                "sampledValue": sampled,
             }],
         }
         if transaction_id:
@@ -2337,6 +2343,11 @@ class ChargingStationController:
             "Energy.Active.Import.Register",
         )
         meter_data = self.power_contactor_hal.read_meter_values()
+        sampled = self._build_sampled_values(
+            measurands, meter_data, "Sample.Clock", self.meter_value,
+        )
+        if not sampled:
+            return
         payload: Dict[str, Any] = {
             "eventType": "Updated",
             "timestamp": ts_iso,
@@ -2348,9 +2359,7 @@ class ChargingStationController:
             },
             "meterValue": [{
                 "timestamp": ts_iso,
-                "sampledValue": self._build_sampled_values(
-                    measurands, meter_data, "Sample.Clock", self.meter_value,
-                ),
+                "sampledValue": sampled,
             }],
         }
         try:
@@ -2479,13 +2488,12 @@ class ChargingStationController:
             "evse": {"id": self.evse_id, "connectorId": self.connector_id},
             "idToken": id_token,
             "transactionInfo": transaction_info,
-            "meterValue": [{
-                "timestamp": now_iso,
-                "sampledValue": self._build_sampled_values(
-                    measurands, meter_data, "Transaction.Begin", 0,
-                ),
-            }],
         }
+        sampled = self._build_sampled_values(
+            measurands, meter_data, "Transaction.Begin", 0,
+        )
+        if sampled:
+            payload["meterValue"] = [{"timestamp": now_iso, "sampledValue": sampled}]
         try:
             res = await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
             logger.info(f"Transaction started ({trigger_reason}): {self.transaction_id}")
@@ -2600,13 +2608,12 @@ class ChargingStationController:
                 "transactionId": self.transaction_id,
                 "chargingState": "EVConnected",
             },
-            "meterValue": [{
-                "timestamp": now_iso,
-                "sampledValue": self._build_sampled_values(
-                    measurands, meter_data, "Transaction.Begin", 0,
-                ),
-            }],
         }
+        sampled = self._build_sampled_values(
+            measurands, meter_data, "Transaction.Begin", 0,
+        )
+        if sampled:
+            payload["meterValue"] = [{"timestamp": now_iso, "sampledValue": sampled}]
         try:
             await self.ocpp_client.call("TransactionEvent", payload)
             logger.info(f"Transaction started (EVConnected): {self.transaction_id}")
@@ -2696,6 +2703,15 @@ class ChargingStationController:
             next_seq_no = self._tx_seq_no + 1
             measurands = self._get_param("SampledDataCtrlr", "TxUpdatedMeasurands",
                                          "Energy.Active.Import.Register")
+            sampled = self._build_sampled_values(
+                measurands, meter_data, "Sample.Periodic", self.meter_value,
+            )
+            # TC_J_03_CS: if OCTT disabled sampled values for this context
+            # (empty Measurands), skip the iteration — the loop's purpose is
+            # to emit MeterValuePeriodic samples, and an empty sampledValue
+            # would fail schema validation.
+            if not sampled:
+                continue
             payload = {
                 "eventType": "Updated",
                 "timestamp": now_iso,
@@ -2708,8 +2724,7 @@ class ChargingStationController:
                 "meterValue": [
                     {
                         "timestamp": now_iso,
-                        "sampledValue": self._build_sampled_values(
-                            measurands, meter_data, "Sample.Periodic", self.meter_value)
+                        "sampledValue": sampled,
                     }
                 ]
             }
@@ -2747,14 +2762,15 @@ class ChargingStationController:
                     "transactionInfo": {
                         "transactionId": self.transaction_id
                     },
-                    "meterValue": [
-                        {
-                            "timestamp": now_iso,
-                            "sampledValue": self._build_sampled_values(
-                                measurands, meter_data, "Transaction.Begin", self.meter_value)
-                        }
-                    ]
                 }
+                sampled = self._build_sampled_values(
+                    measurands, meter_data, "Transaction.Begin", self.meter_value,
+                )
+                if sampled:
+                    payload["meterValue"] = [{
+                        "timestamp": now_iso,
+                        "sampledValue": sampled,
+                    }]
                 await self.ocpp_client.call("TransactionEvent", payload, allow_offline=True)
                 self.power_contactor_hal.control_relay("Close")
                 # Drop to 53% PWM (32 Amps continuous limit) to allow vehicle onboard charger to pull power
@@ -2894,14 +2910,21 @@ class ChargingStationController:
                     "stoppedReason": stopped_reason,
                     "chargingState": charging_state,
                 },
-                "meterValue": [
-                    {
-                        "timestamp": now_iso,
-                        "sampledValue": self._build_sampled_values(
-                            measurands, meter_data, "Transaction.End", self.meter_value)
-                    }
-                ]
             }
+            # TC_J_03_CS: OCTT sets TxEndedMeasurands="" to suppress sampled
+            # values on Ended. _build_sampled_values returns [] in that case
+            # — and the MeterValue schema's sampledValue requires minItems=1
+            # so a block with an empty sampledValue fails validation and the
+            # whole Ended never reaches the CSMS. Only include meterValue
+            # when at least one sampledValue was generated.
+            sampled = self._build_sampled_values(
+                measurands, meter_data, "Transaction.End", self.meter_value,
+            )
+            if sampled:
+                payload["meterValue"] = [{
+                    "timestamp": now_iso,
+                    "sampledValue": sampled,
+                }]
             # TC_C_39_CS: include the stopping token on the Ended event when
             # the stop was triggered by a scan.
             if id_token is not None:

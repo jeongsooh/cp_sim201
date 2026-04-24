@@ -1789,11 +1789,19 @@ class ChargingStationController:
         transaction_id: Optional[str] = None,
         context: str = "Sample.Periodic",
         measurands: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
     ) -> None:
-        """Sends a standalone MeterValues message (Block J / TC_J_01..J_03)."""
+        """Sends a standalone MeterValues message (Block J / TC_J_01..J_03).
+
+        TC_J_01_CS: clock-aligned samples must carry the boundary timestamp
+        (e.g. 08:01:00Z, not the send time 08:01:16Z). Callers that care —
+        the aligned-data loop — pass `timestamp=boundary_dt`; others leave it
+        None to get datetime.now().
+        """
         evse_id = evse_id or self.evse_id
         meter_data = self.power_contactor_hal.read_meter_values()
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts_dt = timestamp or datetime.now(timezone.utc)
+        ts_iso = ts_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         if measurands is None:
             measurands = self._get_param(
                 "AlignedDataCtrlr", "Measurands",
@@ -1802,7 +1810,7 @@ class ChargingStationController:
         payload = {
             "evseId": evse_id,
             "meterValue": [{
-                "timestamp": now,
+                "timestamp": ts_iso,
                 "sampledValue": self._build_sampled_values(
                     measurands, meter_data, context, self.meter_value,
                 ),
@@ -1819,10 +1827,15 @@ class ChargingStationController:
     async def _aligned_data_loop(self) -> None:
         """TC_J_01/02_CS: clock-aligned MeterValues on AlignedDataCtrlr.Interval.
 
-        The loop runs continuously once boot is Accepted. interval<=0 parks
-        the loop awaiting a future change to Interval (checked every 30s).
-        When a tx is active the sampled values are attached to the tx via the
-        transactionId so the CSMS can correlate.
+        OCTT validates that the `timestamp` field on each MeterValuesRequest
+        lines up with a clock boundary: for interval=60 the timestamp must
+        be on a whole-minute boundary (08:01:00Z), for interval=900 on
+        quarter-hour boundaries (08:00, 08:15, ...). Two pieces:
+          * sleep until the next boundary (not just `sleep(interval)`),
+          * stamp the MeterValue with that boundary time, not now().
+        interval<=0 parks the loop awaiting a future change (checked every
+        30s). When a tx is active, the sampled values are attached to the
+        tx via transactionId so the CSMS can correlate.
         """
         while True:
             try:
@@ -1830,10 +1843,18 @@ class ChargingStationController:
                 if interval <= 0:
                     await asyncio.sleep(30)
                     continue
-                await asyncio.sleep(interval)
+                now = datetime.now(timezone.utc)
+                epoch_secs = now.timestamp()
+                next_boundary = (int(epoch_secs) // interval + 1) * interval
+                sleep_secs = next_boundary - epoch_secs
+                await asyncio.sleep(sleep_secs)
+                boundary_dt = datetime.fromtimestamp(
+                    next_boundary, tz=timezone.utc,
+                )
                 await self.send_meter_values(
                     transaction_id=self.transaction_id,
                     context="Sample.Clock",
+                    timestamp=boundary_dt,
                 )
             except asyncio.CancelledError:
                 return

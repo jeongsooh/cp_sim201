@@ -3898,7 +3898,48 @@ class ChargingStationController:
         event_type = "RenewChargingStationCertificate" if security_profile >= 2 else "CertificateInstalled"
         asyncio.create_task(self._send_security_event_notification(event_type))
 
+        # TC_A_11_CS: under Profile 3, OCTT expects the CS to reconnect with
+        # the freshly signed client cert almost immediately. Schedule a
+        # reload-and-reconnect that runs after this CallResult is sent.
+        if (
+            cert_type == "ChargingStationCertificate"
+            and security_profile == 3
+        ):
+            asyncio.create_task(self._reconnect_with_new_client_cert())
+
         return {"status": "Accepted"}
+
+    async def _reconnect_with_new_client_cert(self) -> None:
+        """Rebuild the SSL context from the renewed client.crt/client.key and
+        bounce the WebSocket so the next handshake presents the new cert.
+        TC_A_11_CS: must happen within OCTT's 65s post-CertificateSigned
+        window — the SecurityEventNotification reply has already been queued.
+        """
+        # Let the CertificateSigned response and SecurityEventNotification
+        # reach the CSMS before tearing the socket down.
+        await asyncio.sleep(1.0)
+        try:
+            current_url = (getattr(self.ocpp_client, "server_url", "") or "").rstrip("/")
+            profile = {
+                "securityProfile": 3,
+                "ocppCsmsUrl": current_url,
+            }
+            ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
+                profile, self._cert_dir, self._ca_cert,
+            )
+            self.ocpp_client.update_connection(current_url, ws_kwargs)
+            logger.info("New client cert installed — bouncing WS to reconnect with it")
+        except Exception as e:
+            logger.error(f"Failed to rebuild SSL context after CertificateSigned: {e}")
+            return
+        # Skip the retry backoff so the reconnect is observed within OCTT's
+        # post-CertificateSigned wait window.
+        self.ocpp_client._skip_next_reconnect_wait = True
+        if self.ocpp_client.ws:
+            try:
+                await self.ocpp_client.ws.close()
+            except Exception as e:
+                logger.warning(f"ws.close() raised after CertificateSigned: {e}")
 
     # ------------------------------------------------------------------
     # Block B (추가) — SetNetworkProfile

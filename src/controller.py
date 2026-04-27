@@ -1133,6 +1133,13 @@ class ChargingStationController:
         self._pending_reset = True
         self._pending_reset_type = reset_type
         self._pending_reset_scheduled = False
+        # TC_A_06_CS: arm the skip-backoff flag *before* responding Accepted —
+        # OCTT may close the WS itself within ~400ms of receiving the
+        # response, which races against the 0.5s sleep in _execute_reset.
+        # Setting the flag here ensures the connect loop sees it on the
+        # very next disconnect, regardless of who closes first.
+        if reset_type == "Immediate":
+            self.ocpp_client._skip_next_reconnect_wait = True
         if reset_type == "OnIdle" and self.transaction_id:
             # _execute_reset will be invoked from stop_transaction() once the
             # ongoing transaction ends; don't launch the reboot task now.

@@ -952,10 +952,12 @@ class ChargingStationController:
     async def boot_routine(self, reason: str = "PowerUp") -> None:
         logger.info(f"Executing Boot Routine (reason={reason})")
         firmware_version = self._get_param("ChargingStation", "FirmwareVersion", "1.0.0")
-        # TC_A_07_CS: OCTT requires chargingStation.serialNumber in
-        # BootNotificationRequest. Source from the device model so it
-        # matches GetVariables(ChargingStation, SerialNumber).
-        serial_number = self._get_param("ChargingStation", "SerialNumber", "SN-001")
+        # TC_A_07_CS: OCPP 2.0.1 §A02 requires the TLS client cert CN to
+        # equal the ChargePoint identity. OCTT cross-checks that the
+        # BootNotification.chargingStation.serialNumber matches the cert's
+        # CN, so report station_id (== URL path == cert CN) here rather
+        # than the device model SerialNumber.
+        serial_number = self.ocpp_client.station_id
         payload = {
             "reason": reason,
             "chargingStation": {

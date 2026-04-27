@@ -28,6 +28,7 @@ def mock_client():
     # Represent an online ws so stop_transaction takes the online branch
     # (TC_E_45_CS offline scan-stop split is gated on a live ws).
     client.ws = object()
+    client.station_id = "TEST_STATION"
     return client
 
 

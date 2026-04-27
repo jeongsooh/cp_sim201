@@ -3883,6 +3883,26 @@ class ChargingStationController:
             logger.error(f"CertificateSigned: failed to write file: {e}")
             return {"status": "Rejected"}
 
+        # TC_M_23_CS: register the renewed cert so GetInstalledCertificateIds
+        # surfaces it. Prune any stale entry of the same type we previously
+        # tracked so the listing reflects the current cert only.
+        try:
+            hash_data = self._make_cert_hash_data(cert_chain_pem)
+            serial = hash_data["serialNumber"]
+            for old_serial, entry in list(self.installed_certificates.items()):
+                if entry.get("certificateType") == cert_type:
+                    del self.installed_certificates[old_serial]
+            self.installed_certificates[serial] = {
+                "certificateType": cert_type,
+                "certificateHashData": hash_data,
+                "pem_path": cert_path,
+            }
+            logger.info(
+                f"CertificateSigned: registered type={cert_type} serial={serial}"
+            )
+        except Exception as e:
+            logger.warning(f"CertificateSigned: failed to register hash data: {e}")
+
         # Track which CSMS URL this cert is valid for (TC_A_21_CS downgrade-prevention)
         if cert_type == "ChargingStationCertificate":
             current_url = (getattr(self.ocpp_client, "server_url", "") or "").rstrip("/")

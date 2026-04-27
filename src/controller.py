@@ -2359,16 +2359,21 @@ class ChargingStationController:
                 logger.error(f"Failed to send LogStatusNotification (Uploaded): {e}")
             return
 
-        attempts = max(retries, 1)
+        # OCTT (TC_N_26_CS) expects (1 + retries) Uploading messages spaced
+        # exactly retryInterval seconds apart, with UploadFailure emitted
+        # right after the last attempt — total span first→failure ≈
+        # retries × retryInterval.
+        attempts = 1 + max(retries, 0)
         interval = max(retry_interval, 1)
         for i in range(attempts):
+            if i > 0:
+                await asyncio.sleep(interval)
             try:
                 await self.ocpp_client.call("LogStatusNotification",
                                             {"status": "Uploading", "requestId": request_id})
                 logger.info(f"LogStatusNotification: Uploading (attempt {i + 1}/{attempts})")
             except Exception as e:
                 logger.error(f"Failed to send LogStatusNotification (Uploading): {e}")
-            await asyncio.sleep(interval)
         try:
             await self.ocpp_client.call("LogStatusNotification",
                                         {"status": "UploadFailure", "requestId": request_id})

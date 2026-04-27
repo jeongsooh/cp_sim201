@@ -2339,29 +2339,42 @@ class ChargingStationController:
         retry_interval: int = 0,
     ) -> None:
         # TC_N_25_CS happy path: single Uploading → Uploaded pair.
-        # TC_N_26_CS failure path: per OCPP 2.0.1 §N02.FR.05 — try (1+retries)
-        # times, sending Uploading on each attempt, and report UploadFailure
-        # exactly once after the final attempt fails.
-        attempts = (1 + retries) if will_fail else 1
-        for i in range(attempts):
+        # TC_N_26_CS failure path: OCPP 2.0.1 GetLogRequest.retries is the
+        # *total* number of attempts. OCTT expects (retries × retryInterval)
+        # seconds between the first Uploading and the final UploadFailure.
+        if not will_fail:
             await asyncio.sleep(2)
+            try:
+                await self.ocpp_client.call("LogStatusNotification",
+                                            {"status": "Uploading", "requestId": request_id})
+                logger.info("LogStatusNotification: Uploading")
+            except Exception as e:
+                logger.error(f"Failed to send LogStatusNotification (Uploading): {e}")
+            await asyncio.sleep(2)
+            try:
+                await self.ocpp_client.call("LogStatusNotification",
+                                            {"status": "Uploaded", "requestId": request_id})
+                logger.info("LogStatusNotification: Uploaded")
+            except Exception as e:
+                logger.error(f"Failed to send LogStatusNotification (Uploaded): {e}")
+            return
+
+        attempts = max(retries, 1)
+        interval = max(retry_interval, 1)
+        for i in range(attempts):
             try:
                 await self.ocpp_client.call("LogStatusNotification",
                                             {"status": "Uploading", "requestId": request_id})
                 logger.info(f"LogStatusNotification: Uploading (attempt {i + 1}/{attempts})")
             except Exception as e:
                 logger.error(f"Failed to send LogStatusNotification (Uploading): {e}")
-            # simulate the upload taking some time and then failing
-            await asyncio.sleep(2)
-            if i + 1 < attempts:
-                await asyncio.sleep(max(retry_interval, 1))
-        final_status = "UploadFailure" if will_fail else "Uploaded"
+            await asyncio.sleep(interval)
         try:
             await self.ocpp_client.call("LogStatusNotification",
-                                        {"status": final_status, "requestId": request_id})
-            logger.info(f"LogStatusNotification: {final_status}")
+                                        {"status": "UploadFailure", "requestId": request_id})
+            logger.info("LogStatusNotification: UploadFailure")
         except Exception as e:
-            logger.error(f"Failed to send LogStatusNotification ({final_status}): {e}")
+            logger.error(f"Failed to send LogStatusNotification (UploadFailure): {e}")
 
     # ------------------------------------------------------------------
     # Block L — Remote Trigger

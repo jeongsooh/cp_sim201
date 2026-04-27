@@ -358,6 +358,29 @@ class ChargingStationController:
         # value: {"certificateType": str, "certificateHashData": dict, "pem_path": str}
         # TC_M_23_CS: persist across service restarts.
         self.installed_certificates: Dict[str, Dict] = load_installed_certificates()
+        # TC_M_23_CS: auto-register the station_config CA cert as a
+        # CSMSRootCertificate on startup. Without it, GetInstalledCertificateIds
+        # returns NotFound and the test ERRORs because OCTT has no target to
+        # try DeleteCertificate against.
+        if self._ca_cert and os.path.exists(self._ca_cert):
+            try:
+                with open(self._ca_cert, "r", encoding="utf-8") as f:
+                    ca_pem = f.read()
+                hash_data = self._make_cert_hash_data(ca_pem)
+                serial = hash_data["serialNumber"]
+                if serial not in self.installed_certificates:
+                    self.installed_certificates[serial] = {
+                        "certificateType": "CSMSRootCertificate",
+                        "certificateHashData": hash_data,
+                        "pem_path": self._ca_cert,
+                    }
+                    save_installed_certificates(self.installed_certificates)
+                    logger.info(
+                        f"Auto-registered CSMSRootCertificate from {self._ca_cert} "
+                        f"(serial={serial})"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to auto-register CA cert: {e}")
         # CertificateSigned로 수신한 클라이언트 인증서 경로 — 다음 재시작 시 적용
         self._pending_client_cert: Optional[str] = None
         # TC_A_23_CS: SignCertificate → CertificateSigned 대기를 위한 이벤트

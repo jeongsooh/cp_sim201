@@ -2339,8 +2339,9 @@ class ChargingStationController:
         retry_interval: int = 0,
     ) -> None:
         # TC_N_25_CS happy path: single Uploading → Uploaded pair.
-        # TC_N_26_CS failure path: Uploading → UploadFailure repeated
-        # (1 + retries) times with retry_interval seconds between attempts.
+        # TC_N_26_CS failure path: per OCPP 2.0.1 §N02.FR.05 — try (1+retries)
+        # times, sending Uploading on each attempt, and report UploadFailure
+        # exactly once after the final attempt fails.
         attempts = (1 + retries) if will_fail else 1
         for i in range(attempts):
             await asyncio.sleep(2)
@@ -2350,16 +2351,17 @@ class ChargingStationController:
                 logger.info(f"LogStatusNotification: Uploading (attempt {i + 1}/{attempts})")
             except Exception as e:
                 logger.error(f"Failed to send LogStatusNotification (Uploading): {e}")
+            # simulate the upload taking some time and then failing
             await asyncio.sleep(2)
-            final_status = "UploadFailure" if will_fail else "Uploaded"
-            try:
-                await self.ocpp_client.call("LogStatusNotification",
-                                            {"status": final_status, "requestId": request_id})
-                logger.info(f"LogStatusNotification: {final_status}")
-            except Exception as e:
-                logger.error(f"Failed to send LogStatusNotification ({final_status}): {e}")
-            if will_fail and i + 1 < attempts:
+            if i + 1 < attempts:
                 await asyncio.sleep(max(retry_interval, 1))
+        final_status = "UploadFailure" if will_fail else "Uploaded"
+        try:
+            await self.ocpp_client.call("LogStatusNotification",
+                                        {"status": final_status, "requestId": request_id})
+            logger.info(f"LogStatusNotification: {final_status}")
+        except Exception as e:
+            logger.error(f"Failed to send LogStatusNotification ({final_status}): {e}")
 
     # ------------------------------------------------------------------
     # Block L — Remote Trigger

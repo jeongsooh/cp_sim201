@@ -210,10 +210,15 @@ _PENDING_ALLOWED_ACTIONS = frozenset({
 
 
 class ChargingStationController:
-    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = "", ca_cert: str = ""):
+    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = "", ca_cert: str = "", serial_number: str = ""):
         self.ocpp_client = ocpp_client
         self.evse_id = 1
         self.connector_id = 1
+        # Manufacturing serial number from station_config.json. Used as
+        # BootNotification.chargingStation.serialNumber — this is the
+        # provisioning identifier the operator uses to register the unit
+        # with the CSMS, separate from the OCPP identity (station_id).
+        self._serial_number: str = serial_number
 
         self.connector_hal = ConnectorHAL(self.evse_id, self.connector_id, self.ocpp_client)
         self.token_reader_hal = TokenReaderHAL(self.ocpp_client)
@@ -978,12 +983,11 @@ class ChargingStationController:
     async def boot_routine(self, reason: str = "PowerUp") -> None:
         logger.info(f"Executing Boot Routine (reason={reason})")
         firmware_version = self._get_param("ChargingStation", "FirmwareVersion", "1.0.0")
-        # TC_A_07_CS: OCPP 2.0.1 §A02 requires the TLS client cert CN to
-        # equal the ChargePoint identity. OCTT cross-checks that the
-        # BootNotification.chargingStation.serialNumber matches the cert's
-        # CN, so report station_id (== URL path == cert CN) here rather
-        # than the device model SerialNumber.
-        serial_number = self.ocpp_client.station_id
+        # Manufacturing serial number from station_config.json (set during
+        # provisioning). Falls back to station_id if config didn't provide
+        # one, which keeps the OCTT TC_A_07_CS cert-CN-matches-serialNumber
+        # check passing for setups that don't yet provision a serial.
+        serial_number = self._serial_number or self.ocpp_client.station_id
         payload = {
             "reason": reason,
             "chargingStation": {

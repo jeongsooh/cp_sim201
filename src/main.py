@@ -153,6 +153,7 @@ async def main() -> None:
         security_profile=cfg.security_profile,
         basic_auth_user=cfg.basic_auth_user,
         ca_cert=cfg.ca_cert,
+        serial_number=cfg.serial_number,
     )
 
     # 2. Connect to CSMS in the background (on_connect callback sends BootNotification)

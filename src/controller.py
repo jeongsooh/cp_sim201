@@ -952,11 +952,16 @@ class ChargingStationController:
     async def boot_routine(self, reason: str = "PowerUp") -> None:
         logger.info(f"Executing Boot Routine (reason={reason})")
         firmware_version = self._get_param("ChargingStation", "FirmwareVersion", "1.0.0")
+        # TC_A_07_CS: OCTT requires chargingStation.serialNumber in
+        # BootNotificationRequest. Source from the device model so it
+        # matches GetVariables(ChargingStation, SerialNumber).
+        serial_number = self._get_param("ChargingStation", "SerialNumber", "SN-001")
         payload = {
             "reason": reason,
             "chargingStation": {
                 "model": "AC_SIMULATOR_201",
                 "vendorName": "TEST_CORP",
+                "serialNumber": serial_number,
                 "firmwareVersion": firmware_version,
             }
         }

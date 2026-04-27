@@ -1182,6 +1182,10 @@ class ChargingStationController:
         except Exception as e:
             logger.error(f"Failed to apply active network profile on reset: {e}")
         logger.info("Reset: closing WebSocket for reconnection")
+        # TC_A_06_CS: skip the RetryBackOffWaitMinimum delay on the immediate
+        # post-Reset reconnect; OCTT only waits a short window for the
+        # connection attempt after Reset.
+        self.ocpp_client._skip_next_reconnect_wait = True
         if self.ocpp_client.ws:
             try:
                 await self.ocpp_client.ws.close()

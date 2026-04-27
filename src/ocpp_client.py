@@ -66,6 +66,13 @@ class OCPPClient:
         # failure count; it may call update_connection() to swap ws_kwargs.
         self._connection_failure_handler: Optional[Callable[[int], None]] = None
         self._consecutive_failures: int = 0
+        # TC_A_06_CS: when the controller closes the WS deliberately (e.g.
+        # for a Reset), the immediate reconnect should not pay the full
+        # RetryBackOffWaitMinimum penalty — that backoff is for *failed*
+        # attempts, not intentional cycle-the-connection cases. The
+        # controller sets this just before ws.close(); the connect loop
+        # consumes it on the next iteration.
+        self._skip_next_reconnect_wait: bool = False
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -257,7 +264,13 @@ class OCPPClient:
                     if self._consecutive_failures == 0:
                         attempt = 0
                 wait_min, random_range, repeat_times = self._retry_config()
-                if is_transient_rejection:
+                if self._skip_next_reconnect_wait:
+                    # TC_A_06_CS: deliberate disconnect (e.g. post-Reset) →
+                    # try to reconnect immediately so the CSMS observes the
+                    # connection attempt without RetryBackOffWaitMinimum delay.
+                    self._skip_next_reconnect_wait = False
+                    wait_time = 0
+                elif is_transient_rejection:
                     # Don't exponentiate on transient HTTP rejections.
                     wait_time = wait_min + (
                         random.randint(0, random_range) if random_range > 0 else 0
@@ -269,7 +282,8 @@ class OCPPClient:
                         + (random.randint(0, random_range) if random_range > 0 else 0)
                     )
                 logger.info(f"Reconnecting in {wait_time}s (attempt {attempt + 1})...")
-                await asyncio.sleep(wait_time)
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
                 attempt += 1
 
     async def _drain_offline_queue(self) -> None:

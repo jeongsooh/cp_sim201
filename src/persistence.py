@@ -17,6 +17,7 @@ _NETWORK_PROFILES_FILE = os.path.join(_DATA_DIR, "network_profiles.json")
 _CERT_METADATA_FILE = os.path.join(_DATA_DIR, "cert_metadata.json")
 _ADMIN_STATE_FILE = os.path.join(_DATA_DIR, "admin_state.json")
 _AUTH_CACHE_FILE = os.path.join(_DATA_DIR, "auth_cache.json")
+_INSTALLED_CERTS_FILE = os.path.join(_DATA_DIR, "installed_certificates.json")
 
 
 def _ensure_data_dir() -> None:
@@ -166,3 +167,31 @@ def save_auth_cache(cache: Dict[str, Dict]) -> None:
         logger.debug(f"Auth cache saved to {_AUTH_CACHE_FILE} ({len(cache)} entries)")
     except Exception as e:
         logger.warning(f"Failed to save auth cache: {e}")
+
+
+def load_installed_certificates() -> Dict[str, Dict]:
+    """TC_M_23_CS: persist InstallCertificate-installed CA certs across
+    service restarts so DeleteCertificate can target a previously installed
+    cert even after a reboot."""
+    _ensure_data_dir()
+    if not os.path.exists(_INSTALLED_CERTS_FILE):
+        return {}
+    try:
+        with open(_INSTALLED_CERTS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load installed certificates: {e}")
+        return {}
+
+
+def save_installed_certificates(certs: Dict[str, Dict]) -> None:
+    _ensure_data_dir()
+    try:
+        with open(_INSTALLED_CERTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(certs, f, indent=2)
+        logger.debug(
+            f"Installed certificates saved to {_INSTALLED_CERTS_FILE} "
+            f"({len(certs)} entries)"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to save installed certificates: {e}")

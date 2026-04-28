@@ -206,6 +206,13 @@ _PENDING_ALLOWED_ACTIONS = frozenset({
     "UnpublishFirmware",
     "Reset",
     "GetLog",
+    # TC_B_02_CS: actions whose response carries a regular status enum
+    # (Accepted/Rejected). Per OCPP 2.0.1 §B02 OCTT expects them to receive
+    # a normal-shaped response with status "Rejected" while the CS is
+    # Pending, NOT an RPC SecurityError. Their handlers already reject when
+    # _boot_status != "Accepted", so just let them past the gate.
+    "RequestStartTransaction",
+    "RequestStopTransaction",
 })
 
 

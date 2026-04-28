@@ -1093,14 +1093,17 @@ class ChargingStationController:
                 self._pending_reset = False
                 self._pending_reset_scheduled = False
                 self._first_connect = False
+                # [OCPP 2.0.1 TC_A_19_CS / Part 2 §A08] 보안 프로파일 업그레이드 후
+                # priority에서 하위 보안 slot을 제거해 downgrade 차단.
+                # Run this BEFORE boot_routine so an in-flight
+                # GetVariables(NetworkConfigurationPriority) from the CSMS
+                # never observes the pre-prune value.
+                self._prune_network_priority_after_upgrade()
                 await self.boot_routine(reason=boot_reason)
                 # TC_B_21_CS step 11: after a post-Reset boot, the CS must
                 # send a SecurityEventNotificationRequest of type
                 # StartupOfTheDevice or ResetOrReboot.
                 await self._send_security_event_notification("ResetOrReboot")
-                # [OCPP 2.0.1 TC_A_19_CS / Part 2 §A08] 보안 프로파일 업그레이드 후
-                # priority에서 하위 보안 slot을 제거해 downgrade 차단
-                self._prune_network_priority_after_upgrade()
             elif self._first_connect:
                 self._first_connect = False
                 await self.boot_routine(reason="PowerUp")

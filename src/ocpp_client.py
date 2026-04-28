@@ -270,6 +270,13 @@ class OCPPClient:
                     # connection attempt without RetryBackOffWaitMinimum delay.
                     self._skip_next_reconnect_wait = False
                     wait_time = 0
+                elif attempt == 0 and not is_transient_rejection:
+                    # TC_A_05_CS: first retry after a previously-healthy
+                    # connection (e.g. CSMS-initiated close) should fire
+                    # immediately. RetryBackOffWaitMinimum applies to the
+                    # second and later retries. OCTT's invalid-cert window
+                    # is only ~2-3s, so a 90s wait misses it entirely.
+                    wait_time = 0
                 elif is_transient_rejection:
                     # Don't exponentiate on transient HTTP rejections.
                     wait_time = wait_min + (

@@ -227,21 +227,8 @@ class OCPPClient:
                 )
                 if is_cert_error:
                     self.tls_cert_error_occurred = True
-                # TC_E_16_CS: a server-side rejection (HTTP 4xx/5xx,
-                # websockets.InvalidStatus) is a transient "server busy"
-                # signal rather than a genuine connection failure. OCTT in
-                # particular rejects briefly ("currently rejecting the
-                # WebSocket on purpose") and expects the CS to retry inside
-                # a short window. Cap the backoff to wait_min for these
-                # cases so the next retry happens well before OCTT's
-                # per-testcase acceptance window closes.
-                is_transient_rejection = (
-                    isinstance(e, websockets.exceptions.InvalidStatus)
-                    and not is_cert_error
-                )
                 logger.warning(
                     f"Connection error (cert_error={is_cert_error}, "
-                    f"transient={is_transient_rejection}, "
                     f"type={type(e).__name__}): {e_str[:300]}"
                 )
                 # TC_C_16_CS: drop the dead socket reference so concurrent
@@ -270,12 +257,11 @@ class OCPPClient:
                     # Only set by code paths that own the close.
                     self._skip_next_reconnect_wait = False
                     wait_time = 0
-                elif is_transient_rejection:
-                    # Don't exponentiate on transient HTTP rejections.
-                    wait_time = wait_min + (
-                        random.randint(0, random_range) if random_range > 0 else 0
-                    )
                 else:
+                    # OCPP 2.0.1: every unsuccessful retry doubles the wait
+                    # up to RetryBackOffRepeatTimes. Applies uniformly to
+                    # ConnectionClosed, network errors, and HTTP rejections
+                    # (TC_B_57_CS verifies the doubling on repeated reject).
                     step = min(attempt, repeat_times)
                     wait_time = (
                         wait_min * (2 ** step)

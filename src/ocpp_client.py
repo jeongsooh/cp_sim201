@@ -304,6 +304,21 @@ class OCPPClient:
         logger.info(f"[OfflineQueue] Replaying {len(entries)} queued messages")
         replay_results: List[tuple] = []
         for entry in entries:
+            # TC_B_52_CS / OCPP 2.0.1 §B12.FR.04: on reconnect the CS reports
+            # only the LATEST status per connector via the post-connect
+            # _send_availability_status_notification. Replaying queued
+            # StatusNotifications here would produce duplicates that OCTT
+            # rejects ("already received a StatusNotification on this EVSE,
+            # connector"). TransactionEvent and other queued events still
+            # replay normally to preserve the offline event history.
+            if entry.get("action") == "StatusNotification":
+                logger.info(
+                    "[OfflineQueue] Skipping queued StatusNotification "
+                    f"(latest state already sent on reconnect): "
+                    f"{entry.get('payload', {})}"
+                )
+                await self.offline_queue.ack_in_flight(entry)
+                continue
             try:
                 response = await self.call(entry["action"], entry["payload"])
                 logger.info(f"[OfflineQueue] Replayed: {entry['action']}")

@@ -853,15 +853,21 @@ class ChargingStationController:
 
         if component == "OCPPCommCtrlr" and variable == "NetworkConfigurationPriority":
             # TC_A_21_CS: 활성 slot이 Profile 3를 요구하는데 현재 client cert가
-            # 해당 CSMS URL에 대해 서명된 것이 아니면 Rejected.
+            # 해당 CSMS root 하에서 서명된 것이 아니면 Rejected.
+            # TC_B_45_CS ("Same CSMS Root"): 같은 hostname이면 port가 달라도
+            # 기존 cert가 그대로 유효 — TLS server cert는 hostname-SAN 기반이라
+            # URL 전체 매칭이 아닌 hostname 매칭으로 비교한다.
             slots = [s.strip() for s in value.split(",") if s.strip()]
             if slots:
                 profiles = load_network_profiles()
                 active = profiles.get(slots[0])
                 if active and int(active.get("securityProfile", 0)) == 3:
+                    from urllib.parse import urlparse
                     target_url = (active.get("ocppCsmsUrl") or "").rstrip("/")
                     saved_url = (self._cert_valid_for_url or "").rstrip("/")
-                    if not saved_url or saved_url != target_url:
+                    target_host = urlparse(target_url).hostname or ""
+                    saved_host = urlparse(saved_url).hostname or ""
+                    if not saved_host or saved_host != target_host:
                         logger.warning(
                             f"NetworkConfigurationPriority rejected: active slot requires "
                             f"Profile 3 at {target_url!r}, but no valid ChargingStationCertificate "

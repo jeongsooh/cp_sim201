@@ -236,6 +236,13 @@ class ChargingStationController:
         # subsequent scan with a DIFFERENT idToken does not stop the
         # transaction (per OCPP 2.0.1 §C01.FR.03).
         self._tx_id_token_value: Optional[str] = None
+        # TC_E_05_CS: the RFID reader emits the same UID repeatedly while a
+        # tag is in the field, and rfid_monitor polls every 0.5s — so a
+        # single tap can produce two scans ~0.5s apart. Without debounce the
+        # second scan would be interpreted as a deliberate same-idToken
+        # Stop-scan and end an just-started tx before EVConnectionTimeOut.
+        self._last_rfid_uid: Optional[str] = None
+        self._last_rfid_scan_at: float = 0.0
         # TC_C_39_CS: also remember the groupIdToken that CSMS returned when
         # authorizing the tx. A later scan whose Authorize response carries
         # the same groupIdToken grants stop-authority (OCPP 2.0.1 §C09).
@@ -2539,6 +2546,25 @@ class ChargingStationController:
 
     async def handle_rfid_scan(self, raw_uid: str) -> None:
         logger.info(f"RFID scanned: {raw_uid}")
+        # TC_E_05_CS: hardware double-scan / continued-presence debounce.
+        # The RFID reader emits the same UID repeatedly while the tag stays
+        # in the field; rfid_monitor polls every 0.5s, so a single user tap
+        # can fire handle_rfid_scan twice ~0.5s apart. Without this guard
+        # the second scan, with the tx already authorized, is treated as a
+        # same-idToken Stop-scan and ends the transaction before
+        # EVConnectionTimeOut can elapse.
+        now = time.time()
+        if (
+            self._last_rfid_uid == raw_uid
+            and (now - self._last_rfid_scan_at) < 2.0
+        ):
+            logger.info(
+                f"Ignoring duplicate RFID scan {raw_uid} "
+                f"({now - self._last_rfid_scan_at:.2f}s after previous)"
+            )
+            return
+        self._last_rfid_uid = raw_uid
+        self._last_rfid_scan_at = now
         # OCTT TC_C_02 etc. issue KeyCode-typed tokens — the hex UID from the
         # RFID reader is a keycode string as far as OCPP is concerned. Keep
         # type as "KeyCode" so the authorize payload matches OCTT expectations.

@@ -217,7 +217,7 @@ _PENDING_ALLOWED_ACTIONS = frozenset({
 
 
 class ChargingStationController:
-    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = "", ca_cert: str = "", serial_number: str = ""):
+    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = "", ca_cert: str = "", serial_number: str = "", firmware_version: str = "2.1.1"):
         self.ocpp_client = ocpp_client
         self.evse_id = 1
         self.connector_id = 1
@@ -226,6 +226,13 @@ class ChargingStationController:
         # provisioning identifier the operator uses to register the unit
         # with the CSMS, separate from the OCPP identity (station_id).
         self._serial_number: str = serial_number
+        # FirmwareVersion reported in BootNotification and exposed via the
+        # ChargingStation.FirmwareVersion device-model variable. Sourced
+        # from station_config.json so the value matches PICS without
+        # touching code; overrides any persisted device_model value
+        # because the running firmware is the source of truth (only an
+        # UpdateFirmware operation should change it at runtime).
+        self._firmware_version: str = firmware_version
 
         self.connector_hal = ConnectorHAL(self.evse_id, self.connector_id, self.ocpp_client)
         self.token_reader_hal = TokenReaderHAL(self.ocpp_client)
@@ -411,7 +418,7 @@ class ChargingStationController:
             "ChargingStation": {
                 "Model":             ("AC_SIMULATOR_201", "ReadOnly"),
                 "VendorName":        ("TEST_CORP",        "ReadOnly"),
-                "FirmwareVersion":   ("1.0.0",            "ReadWrite"),
+                "FirmwareVersion":   (firmware_version,   "ReadWrite"),
                 "SerialNumber":      ("SN-001",           "ReadOnly"),
                 "AvailabilityState": ("Available",        "ReadOnly"),
                 "Available":         ("true",             "ReadOnly"),
@@ -535,6 +542,14 @@ class ChargingStationController:
         # Mutability stays ReadOnly per OCPP 2.0.1 — SecurityProfile is changed via
         # the SetNetworkProfile + Reset flow, not directly via SetVariables.
         self.device_model["SecurityCtrlr"]["SecurityProfile"] = (str(security_profile), "ReadOnly")
+
+        # FirmwareVersion is ReadWrite for OCPP, but for our simulator the
+        # config file represents the actual running firmware — override any
+        # persisted value so station_config.json stays the source of truth
+        # (only an UpdateFirmware operation should change it at runtime).
+        self.device_model["ChargingStation"]["FirmwareVersion"] = (
+            firmware_version, "ReadWrite"
+        )
 
         # TC_B_23_CS: restore admin Inoperative state across reboots. OCPP 2.0.1
         # defines EVSE.AvailabilityState as ReadOnly (so device_model.json
@@ -1002,7 +1017,9 @@ class ChargingStationController:
 
     async def boot_routine(self, reason: str = "PowerUp") -> None:
         logger.info(f"Executing Boot Routine (reason={reason})")
-        firmware_version = self._get_param("ChargingStation", "FirmwareVersion", "1.0.0")
+        firmware_version = self._get_param(
+            "ChargingStation", "FirmwareVersion", self._firmware_version
+        )
         # Manufacturing serial number from station_config.json (set during
         # provisioning). Falls back to station_id if config didn't provide
         # one, which keeps the OCTT TC_A_07_CS cert-CN-matches-serialNumber

@@ -99,6 +99,11 @@ class StationConfig:
         self.station_id: str    = data.get("station_id", "")
         self.csms_url: str      = data.get("csms_url", "")
         self.security_profile: int = int(data.get("security_profile", 0))
+        # ChargingStation.FirmwareVersion reported in BootNotification.
+        # OCTT compares this against the PICS-declared value; mismatch
+        # surfaces as "Reported Firmware Version ... does not match value
+        # from PICS" (TC_L_02_CS log).
+        self.firmware_version: str = str(data.get("firmware_version", "2.1.1"))
 
         auth = data.get("basic_auth", {})
         self.basic_auth_user: str     = auth.get("user", "")
@@ -209,5 +214,6 @@ class StationConfig:
             f"StationConfig(serial={self.serial_number}, "
             f"station_id={self.station_id}, "
             f"profile={self.security_profile}, "
+            f"firmware={self.firmware_version}, "
             f"url={self.csms_url})"
         )

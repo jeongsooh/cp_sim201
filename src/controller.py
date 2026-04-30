@@ -1159,16 +1159,6 @@ class ChargingStationController:
         while True:
             interval = self._get_int("HeartbeatCtrlr", "HeartbeatInterval", 60)
             await asyncio.sleep(interval)
-            # OCPP 2.0.1 §G02.FR.04 — Heartbeat is only required when no
-            # other message has crossed the WS within HeartbeatInterval.
-            # Skip the send when there's been activity in that window;
-            # otherwise an idle-style Heartbeat fired during a user-prompt
-            # pause (TC_G_21_CS reboot prompt) collides with OCTT's
-            # WS-close detection and surfaces as "Failed to send the OCPP
-            # message to the SUT".
-            idle = time.time() - self.ocpp_client.last_message_at
-            if idle < interval:
-                continue
             try:
                 await self.ocpp_client.call("Heartbeat", {})
                 logger.info("Heartbeat sent.")

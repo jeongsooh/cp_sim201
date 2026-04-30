@@ -2645,6 +2645,23 @@ class ChargingStationController:
                 logger.info(f"Authorization cache hit for {raw_uid} — skipping AuthorizeRequest")
                 id_token_info = cached_info
                 status = id_token_info.get("status")
+            elif not self.ocpp_client.ws:
+                # TC_E_43_CS: CSMS unreachable → fall back to LocalAuthList
+                # (AuthCtrlr.LocalAuthorizeOffline + LocalAuthListCtrlr.Enabled)
+                # → AuthCache → OfflineTxForUnknownIdEnabled, in that order.
+                # Without this fallback the AuthorizeRequest call raises
+                # ConnectionError and the offline tx never starts, so OCTT
+                # never sees the queued TransactionEvents on reconnect.
+                offline_info = self._authorize_offline(raw_uid)
+                if offline_info is None:
+                    logger.warning(
+                        f"Offline authorize failed for {raw_uid} — no local "
+                        f"list / cache entry and OfflineTxForUnknownIdEnabled "
+                        f"is false"
+                    )
+                    return
+                id_token_info = offline_info
+                status = id_token_info.get("status")
             else:
                 res = await self.ocpp_client.call("Authorize", {"idToken": id_token})
                 id_token_info = (res or {}).get("idTokenInfo", {}) or {}
@@ -2701,6 +2718,48 @@ class ChargingStationController:
                     self._meter_task = None
         except Exception as e:
             logger.error(f"Authorisation call failed: {e}")
+
+    def _authorize_offline(self, raw_uid: str) -> Optional[Dict[str, Any]]:
+        """OCPP 2.0.1 §C13 / TC_E_43_CS — offline authorization fallback.
+
+        When the CSMS is unreachable, try in order:
+          1. LocalAuthList (if LocalAuthListCtrlr.Enabled and
+             AuthCtrlr.LocalAuthorizeOffline).
+          2. AuthCache (also gated on LocalAuthorizeOffline so cached online
+             approvals can carry an offline tx).
+          3. Synthesize Accepted if AuthCtrlr.OfflineTxForUnknownIdEnabled.
+
+        Returns the idTokenInfo to act on, or None when offline auth is
+        denied — caller should not start a tx in that case.
+        """
+        if self._get_bool("AuthCtrlr", "LocalAuthorizeOffline", True):
+            if self._get_bool("LocalAuthListCtrlr", "Enabled", False):
+                for entry in self.local_auth_list:
+                    tok = (entry.get("idToken") or {}).get("idToken")
+                    if tok == raw_uid:
+                        info = entry.get("idTokenInfo", {}) or {}
+                        if info.get("status") == "Accepted":
+                            logger.info(
+                                f"Offline auth: LocalAuthList hit for {raw_uid}"
+                            )
+                            return info
+                        logger.info(
+                            f"Offline auth: LocalAuthList entry for {raw_uid} "
+                            f"is {info.get('status')!r} — denying"
+                        )
+                        return info
+            if self._get_bool("AuthCacheCtrlr", "Enabled", False):
+                cached = self._lookup_auth_cache(raw_uid)
+                if cached is not None:
+                    logger.info(f"Offline auth: AuthCache hit for {raw_uid}")
+                    return cached
+        if self._get_bool("AuthCtrlr", "OfflineTxForUnknownIdEnabled", False):
+            logger.info(
+                f"Offline auth: synthesizing Accepted for {raw_uid} via "
+                f"OfflineTxForUnknownIdEnabled"
+            )
+            return {"status": "Accepted"}
+        return None
 
     def _lookup_auth_cache(self, raw_uid: str) -> Optional[Dict[str, Any]]:
         """Return a non-expired cached idTokenInfo for raw_uid, or None.

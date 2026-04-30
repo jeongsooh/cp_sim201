@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 import random
 import os
@@ -73,6 +74,16 @@ class OCPPClient:
         # controller sets this just before ws.close(); the connect loop
         # consumes it on the next iteration.
         self._skip_next_reconnect_wait: bool = False
+        # OCPP 2.0.1 §G02.FR.04 — Heartbeat is required only when no other
+        # message has crossed the WS within HeartbeatInterval. Track the
+        # last send/recv timestamp so the controller's heartbeat loop can
+        # skip the periodic send when there's been recent activity. This
+        # prevents a Heartbeat-vs-reboot race during user-prompt-driven
+        # tests (TC_G_21_CS): if OCTT pauses message processing while
+        # waiting for a manual reboot, an over-sent Heartbeat would still
+        # be in flight when the WS closes and OCTT marks "Failed to send
+        # the OCPP message".
+        self.last_message_at: float = time.time()
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -352,6 +363,7 @@ class OCPPClient:
             return
 
         logger.info(f"WS RECV: msgId={msg_id} type={msg_type} raw={message[:200]}")
+        self.last_message_at = time.time()
 
         if msg_type == OCPPConfig.MESSAGE_TYPE_RESULT:
             payload = msg_list[2]
@@ -503,6 +515,7 @@ class OCPPClient:
                 try:
                     raw_msg = json.dumps(call_msg)
                     logger.info(f"WS SEND: msgId={msg_id} action={action} payload={raw_msg[:200]}")
+                    self.last_message_at = time.time()
                     try:
                         await self.ws.send(raw_msg)
                     except (ConnectionClosed, OSError) as send_err:
@@ -587,6 +600,7 @@ class OCPPClient:
             return
         raw = json.dumps([OCPPConfig.MESSAGE_TYPE_RESULT, msg_id, payload])
         logger.info(f"WS SEND RESULT: msgId={msg_id}")
+        self.last_message_at = time.time()
         await self.ws.send(raw)
 
     async def _send_error(
@@ -606,4 +620,5 @@ class OCPPClient:
             error_details or {},
         ])
         logger.warning(f"WS SEND ERROR: msgId={msg_id} code={error_code} desc={error_description}")
+        self.last_message_at = time.time()
         await self.ws.send(raw)

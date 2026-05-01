@@ -2603,6 +2603,21 @@ class ChargingStationController:
         #     TransactionEventRequest may follow (§C01.FR.03).
         if self.transaction_id and self.is_authorized:
             if raw_uid == self._tx_id_token_value:
+                # TC_N_30_CS: only treat a same-idToken rescan as Stop
+                # once charging has actually begun (State C → relay
+                # closed → _state_c_active=True). Before that the tx is
+                # still in Idle/EVConnected/PreSession and a rescan is
+                # almost certainly a hardware re-emission or a user
+                # double-tap during the cable-plug prompt — not an
+                # intentional cancellation. Ignoring it lets the
+                # subsequent CablePluggedIn / ChargingStateChanged
+                # events flow as OCTT expects.
+                if not self._state_c_active:
+                    logger.info(
+                        f"Ignoring same-idToken rescan {raw_uid} — "
+                        f"charging not started yet (chargingState != Charging)"
+                    )
+                    return
                 logger.info("Stop-scan (same idToken) — stopping transaction")
                 await self.stop_transaction("Local", id_token=id_token)
                 return

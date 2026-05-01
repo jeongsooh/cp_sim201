@@ -2175,8 +2175,12 @@ class ChargingStationController:
         - "does_not_exist" prefix → TC_L_07_CS DownloadFailed.
         - "install_verification_failed" / "corrupted" / "invalid_firmware"
           → TC_L_08_CS InstallVerificationFailed.
+
+        OCTT mixes hyphens and underscores ("invalid-firmware.zip" vs
+        "invalid_firmware") in marker filenames, so we normalize hyphens
+        to underscores before substring matching.
         """
-        loc = location.lower()
+        loc = location.lower().replace("-", "_")
         if "does_not_exist" in loc:
             return "download_failed"
         if (

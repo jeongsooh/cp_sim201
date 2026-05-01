@@ -1218,17 +1218,17 @@ class ChargingStationController:
             )
             self._pending_reset_scheduled = True
             return {"status": "Scheduled"}
-        # TC_B_50_CS: apply any pending network-profile switch here (not
+        # TC_A_06_CS: arm the skip-backoff flag *before* responding Accepted —
+        # OCTT may close the WS itself within ~400ms of receiving the
+        # response, which races against the 0.5s sleep in _execute_reset.
+        # The first post-Reset attempt fires immediately so it lands
+        # inside OCTT's fixed 65s acceptance window; the SSL/TLS-protocol
+        # error fast-retry path in ocpp_client.connect() handles the
+        # second attempt's timing.
+        # TC_B_50_CS: also apply any pending network-profile switch here (not
         # only inside _execute_reset) so the OCTT-initiated reconnect uses
         # the new URL/ws_kwargs instead of the stale slot.
-        # TC_A_06_CS history: an earlier fix here armed
-        # _skip_next_reconnect_wait to make the post-Reset reconnect
-        # immediate, but OCTT's dynamic-timing system measures the actual
-        # reconnect delay and sizes the next acceptance window
-        # accordingly — a 0-second reconnect produces a window too short
-        # for the *second* attempt (which OCTT serves with TLSv1.2+ to
-        # complete the test scenario). Honoring RetryBackOffWaitMinimum
-        # lets OCTT scale the window so attempt 2 fits.
+        self.ocpp_client._skip_next_reconnect_wait = True
         try:
             await self._apply_active_network_profile()
         except Exception as e:
@@ -1274,12 +1274,14 @@ class ChargingStationController:
         except Exception as e:
             logger.error(f"Failed to apply active network profile on reset: {e}")
         logger.info("Reset: closing WebSocket for reconnection")
-        # No skip-backoff arming here: per OCTT TC_A_06_CS, the dynamic
-        # acceptance window is sized from the observed reconnect delay,
-        # so honoring RetryBackOffWaitMinimum on the post-Reset reconnect
-        # gives OCTT enough room to serve the second attempt with the
-        # corrected TLS version.
+        # TC_A_06_CS / TC_B_57_CS: arm the skip-backoff flag *only* when we
+        # actually own the close. If OCTT already closed the WS earlier
+        # (handle_reset_request races with OCTT's fast disconnect),
+        # ws is None here and our close is a no-op — setting the flag in
+        # that case would leak True into the *next* disconnect and skip
+        # the spec-required RetryBackOffWaitMinimum.
         if self.ocpp_client.ws:
+            self.ocpp_client._skip_next_reconnect_wait = True
             try:
                 await self.ocpp_client.ws.close()
             except Exception as e:

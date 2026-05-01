@@ -73,6 +73,14 @@ class OCPPClient:
         # controller sets this just before ws.close(); the connect loop
         # consumes it on the next iteration.
         self._skip_next_reconnect_wait: bool = False
+        # TC_A_06_CS: one-shot fast retry on a TLS-protocol-version error.
+        # OCTT's "TLS version too low" scenario expects two attempts inside
+        # its fixed ~65s window — the first gets a low-version Server Hello
+        # and is rejected by the CS; the second must land before the window
+        # closes. Reset to False on every successful connect so a future
+        # genuinely persistent TLS-version misconfig still hits exponential
+        # backoff after the first fast retry.
+        self._tls_protocol_retry_done: bool = False
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -210,6 +218,7 @@ class OCPPClient:
                 logger.info("Connection established.")
                 attempt = 0
                 self._consecutive_failures = 0
+                self._tls_protocol_retry_done = False
                 if self._on_connect_callback:
                     asyncio.create_task(self._on_connect_callback())
                 # G4: 재연결 직후 오프라인 큐 재전송
@@ -227,8 +236,26 @@ class OCPPClient:
                 )
                 if is_cert_error:
                     self.tls_cert_error_occurred = True
+                # TC_A_06_CS: OCTT serves a TLS-version-too-low handshake on
+                # the first post-Reset attempt and the corrected version on
+                # the second attempt — both must land inside OCTT's fixed
+                # ~65s acceptance window. The first attempt arrives via the
+                # _skip_next_reconnect_wait path; the second attempt's
+                # backoff would normally be 90+s and miss the window, so
+                # one-shot a wait_time=0 retry whenever the previous attempt
+                # failed with a TLS-protocol-version error.
+                is_tls_protocol_error = (
+                    isinstance(e, ssl.SSLError)
+                    and not is_cert_error
+                    and (
+                        "PROTOCOL_VERSION" in e_str.upper()
+                        or "WRONG_SSL_VERSION" in e_str.upper()
+                        or "UNSUPPORTED_PROTOCOL" in e_str.upper()
+                    )
+                )
                 logger.warning(
                     f"Connection error (cert_error={is_cert_error}, "
+                    f"tls_protocol_error={is_tls_protocol_error}, "
                     f"type={type(e).__name__}): {e_str[:300]}"
                 )
                 # TC_C_16_CS: drop the dead socket reference so concurrent
@@ -256,6 +283,13 @@ class OCPPClient:
                     # or post-cert-renewal swap) → reconnect immediately.
                     # Only set by code paths that own the close.
                     self._skip_next_reconnect_wait = False
+                    wait_time = 0
+                elif is_tls_protocol_error and not self._tls_protocol_retry_done:
+                    # TC_A_06_CS: OCTT swaps from low TLS to TLSv1.2+ between
+                    # the first and second attempts. wait=0 only for the
+                    # first TLS-protocol-error retry; subsequent failures
+                    # fall through to exponential backoff.
+                    self._tls_protocol_retry_done = True
                     wait_time = 0
                 else:
                     # OCPP 2.0.1: every unsuccessful retry doubles the wait

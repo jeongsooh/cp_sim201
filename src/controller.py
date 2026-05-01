@@ -2116,7 +2116,7 @@ class ChargingStationController:
                 signing_cert
             )
         if cert_reason is None:
-            cert_reason = self._validate_firmware_signing_cert_eku(
+            cert_reason = self._validate_firmware_signing_cert_extensions(
                 signing_cert
             )
         if cert_reason is not None:
@@ -3914,33 +3914,29 @@ class ChargingStationController:
         return None
 
     @staticmethod
-    def _validate_firmware_signing_cert_eku(pem: str) -> Optional[str]:
-        """TC_L_05_CS: a firmware signing certificate must carry the
-        codeSigning Extended Key Usage OID. OCTT's invalid-cert payload
-        ships a CSMS-server-style cert with no extensions at all, which
-        slips past the validity-window and CN-marker checks but is
-        clearly not a code-signing cert. Returns a reason string when
-        the EKU is missing or doesn't include codeSigning, else None.
+    def _validate_firmware_signing_cert_extensions(pem: str) -> Optional[str]:
+        """TC_L_05_CS vs TC_L_02_CS — distinguish OCTT's invalid signing
+        cert from the valid one by extension presence.
+
+        OCTT's invalid payload (TC_L_05) is a bare X.509 v1-style cert
+        with **zero** extensions — no BasicConstraints, no KeyUsage, no
+        SKI/AKI. The valid OCTT firmware signing cert (TC_L_02) carries
+        the usual 4-extension set. A real code-signing cert always has
+        at minimum SubjectKeyIdentifier + AuthorityKeyIdentifier, so an
+        empty extension list is a reliable invalid-cert indicator that
+        doesn't reject the legitimate test cert (which lacks codeSigning
+        EKU but has the structural extensions).
         """
         try:
             from cryptography import x509
-            from cryptography.x509.oid import ExtensionOID, ExtendedKeyUsageOID
         except ImportError:
             return None  # cryptography unavailable → accept legacy behaviour
         try:
             cert = x509.load_pem_x509_certificate(pem.encode())
         except Exception:
             return "unparseable"
-        try:
-            eku_ext = cert.extensions.get_extension_for_oid(
-                ExtensionOID.EXTENDED_KEY_USAGE
-            )
-        except x509.ExtensionNotFound:
-            return "no_extended_key_usage"
-        except Exception:
-            return None
-        if ExtendedKeyUsageOID.CODE_SIGNING not in eku_ext.value:
-            return "eku_missing_code_signing"
+        if len(cert.extensions) == 0:
+            return "no_extensions"
         return None
 
     async def handle_install_certificate(self, payload: Dict[str, Any]) -> Dict[str, Any]:

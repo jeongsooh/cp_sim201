@@ -2115,6 +2115,10 @@ class ChargingStationController:
             cert_reason = self._validate_firmware_signing_cert_issuer(
                 signing_cert
             )
+        if cert_reason is None:
+            cert_reason = self._validate_firmware_signing_cert_eku(
+                signing_cert
+            )
         if cert_reason is not None:
             logger.warning(
                 f"UpdateFirmware rejected (TC_L_05): signingCertificate "
@@ -3907,6 +3911,36 @@ class ChargingStationController:
         for marker in cls._INVALID_FIRMWARE_CERT_CN_MARKERS:
             if marker in subject_cn:
                 return f"subject_cn_{marker}"
+        return None
+
+    @staticmethod
+    def _validate_firmware_signing_cert_eku(pem: str) -> Optional[str]:
+        """TC_L_05_CS: a firmware signing certificate must carry the
+        codeSigning Extended Key Usage OID. OCTT's invalid-cert payload
+        ships a CSMS-server-style cert with no extensions at all, which
+        slips past the validity-window and CN-marker checks but is
+        clearly not a code-signing cert. Returns a reason string when
+        the EKU is missing or doesn't include codeSigning, else None.
+        """
+        try:
+            from cryptography import x509
+            from cryptography.x509.oid import ExtensionOID, ExtendedKeyUsageOID
+        except ImportError:
+            return None  # cryptography unavailable → accept legacy behaviour
+        try:
+            cert = x509.load_pem_x509_certificate(pem.encode())
+        except Exception:
+            return "unparseable"
+        try:
+            eku_ext = cert.extensions.get_extension_for_oid(
+                ExtensionOID.EXTENDED_KEY_USAGE
+            )
+        except x509.ExtensionNotFound:
+            return "no_extended_key_usage"
+        except Exception:
+            return None
+        if ExtendedKeyUsageOID.CODE_SIGNING not in eku_ext.value:
+            return "eku_missing_code_signing"
         return None
 
     async def handle_install_certificate(self, payload: Dict[str, Any]) -> Dict[str, Any]:

@@ -118,9 +118,14 @@ class StationConfig:
         self._validate()
 
     def _validate(self) -> None:
-        if not self.serial_number.isdigit() or len(self.serial_number) != 6:
+        # serial_number is a free-form identifier (manufacturing serial, OCPP
+        # station id, or anything in between) — its only spec-relevant
+        # constraint is that it matches the client certificate's commonName
+        # so OCTT TC_A_07_CS's BootNotification.serialNumber vs cert CN
+        # check passes. Reject only empty / overly long values.
+        if not self.serial_number or len(self.serial_number) > 25:
             raise StationConfigError(
-                f"serial_number must be exactly 6 digits, got: '{self.serial_number}'"
+                f"serial_number must be 1-25 characters, got: '{self.serial_number}'"
             )
         if not self.station_id:
             raise StationConfigError("station_id is required")

@@ -4114,40 +4114,56 @@ class ChargingStationController:
         event_type = "RenewChargingStationCertificate" if security_profile >= 2 else "CertificateInstalled"
         asyncio.create_task(self._send_security_event_notification(event_type))
 
-        # TC_A_11_CS: under Profile 3, OCTT expects the CS to reconnect with
-        # the freshly signed client cert almost immediately. Schedule a
-        # reload-and-reconnect that runs after this CallResult is sent.
+        # TC_A_11_CS / TC_A_19_CS: per OCPP RenewChargingStationCertificate
+        # state, "If the certificate is valid, then Charging Station should
+        # reconnect with the new certificate." OCTT enforces this with a
+        # ~64s window and force-drops the WS if the CS doesn't reconnect on
+        # its own. Trigger reconnect for any Profile that uses TLS (>= 2);
+        # Profile 3 also needs the SSL context rebuilt so the new client
+        # cert is presented on the next handshake (Profile 2 has no
+        # client-cert step but still needs the WS bounce).
         if (
             cert_type == "ChargingStationCertificate"
-            and security_profile == 3
+            and security_profile >= 2
         ):
             asyncio.create_task(self._reconnect_with_new_client_cert())
 
         return {"status": "Accepted"}
 
     async def _reconnect_with_new_client_cert(self) -> None:
-        """Rebuild the SSL context from the renewed client.crt/client.key and
-        bounce the WebSocket so the next handshake presents the new cert.
-        TC_A_11_CS: must happen within OCTT's 65s post-CertificateSigned
-        window — the SecurityEventNotification reply has already been queued.
+        """Bounce the WebSocket so the post-CertificateSigned reconnect is
+        observed by OCTT within its ~64s wait window.
+
+        TC_A_11_CS (Profile 3): rebuild the SSL context from the renewed
+        client.crt/client.key so the next handshake presents the new cert.
+        TC_A_19_CS (Profile 2 prep): no client-cert in the handshake, but
+        OCTT still requires the bounce — just close the WS and let the
+        existing ws_kwargs drive the reconnect.
         """
         # Let the CertificateSigned response and SecurityEventNotification
         # reach the CSMS before tearing the socket down.
         await asyncio.sleep(1.0)
-        try:
-            current_url = (getattr(self.ocpp_client, "server_url", "") or "").rstrip("/")
-            profile = {
-                "securityProfile": 3,
-                "ocppCsmsUrl": current_url,
-            }
-            ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
-                profile, self._cert_dir, self._ca_cert,
+        security_profile = self._get_int("SecurityCtrlr", "SecurityProfile", 0)
+        if security_profile == 3:
+            try:
+                current_url = (getattr(self.ocpp_client, "server_url", "") or "").rstrip("/")
+                profile = {
+                    "securityProfile": 3,
+                    "ocppCsmsUrl": current_url,
+                }
+                ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
+                    profile, self._cert_dir, self._ca_cert,
+                )
+                self.ocpp_client.update_connection(current_url, ws_kwargs)
+                logger.info("New client cert installed — bouncing WS to reconnect with it")
+            except Exception as e:
+                logger.error(f"Failed to rebuild SSL context after CertificateSigned: {e}")
+                return
+        else:
+            logger.info(
+                f"CertificateSigned (profile={security_profile}) — bouncing WS "
+                f"to satisfy RenewChargingStationCertificate reconnect step"
             )
-            self.ocpp_client.update_connection(current_url, ws_kwargs)
-            logger.info("New client cert installed — bouncing WS to reconnect with it")
-        except Exception as e:
-            logger.error(f"Failed to rebuild SSL context after CertificateSigned: {e}")
-            return
         # Skip the retry backoff so the reconnect is observed within OCTT's
         # post-CertificateSigned wait window.
         self.ocpp_client._skip_next_reconnect_wait = True

@@ -155,6 +155,7 @@ async def main() -> None:
         ca_cert=cfg.ca_cert,
         serial_number=cfg.serial_number,
         firmware_version=cfg.firmware_version,
+        signature_algorithm=cfg.signature_algorithm,
     )
 
     # 2. Connect to CSMS in the background (on_connect callback sends BootNotification)

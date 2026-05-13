@@ -217,7 +217,7 @@ _PENDING_ALLOWED_ACTIONS = frozenset({
 
 
 class ChargingStationController:
-    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = "", ca_cert: str = "", serial_number: str = "", firmware_version: str = "2.1.1"):
+    def __init__(self, ocpp_client: OCPPClient, cert_dir: str = "/etc/cp_sim201/certs", security_profile: int = 0, basic_auth_user: str = "", ca_cert: str = "", serial_number: str = "", firmware_version: str = "2.1.1", signature_algorithm: str = "RSA"):
         self.ocpp_client = ocpp_client
         self.evse_id = 1
         self.connector_id = 1
@@ -233,6 +233,10 @@ class ChargingStationController:
         # because the running firmware is the source of truth (only an
         # UpdateFirmware operation should change it at runtime).
         self._firmware_version: str = firmware_version
+        # Key algorithm for SignChargingStationCertificate CSRs. Must match
+        # the algorithm the connected CSMS is configured for — OCTT's ECDSA
+        # mode rejects RSA CSRs with an "algorithm mismatch" log line.
+        self._signature_algorithm: str = signature_algorithm.upper()
 
         self.connector_hal = ConnectorHAL(self.evse_id, self.connector_id, self.ocpp_client)
         self.token_reader_hal = TokenReaderHAL(self.ocpp_client)
@@ -974,16 +978,23 @@ class ChargingStationController:
         self._cert_signed_event = None
 
     async def _generate_csr_pem(self) -> str:
-        """Generate a 2048-bit RSA CSR; save the private key for later CertificateSigned use."""
+        """Generate a CSR (RSA-2048 or ECDSA P-256 per self._signature_algorithm)
+        and save the private key for later CertificateSigned use."""
         from cryptography import x509
         from cryptography.x509.oid import NameOID
         from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives.asymmetric import rsa, ec
 
-        key = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        )
+        if self._signature_algorithm == "ECDSA":
+            key = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: ec.generate_private_key(ec.SECP256R1())
+            )
+        else:
+            key = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            )
         os.makedirs(self._cert_dir, exist_ok=True)
         key_path = os.path.join(self._cert_dir, "client.key")
         with open(key_path, "wb") as f:
@@ -1001,7 +1012,10 @@ class ChargingStationController:
             ]))
             .sign(key, hashes.SHA256())
         )
-        logger.info(f"CSR generated, private key saved to {key_path}")
+        logger.info(
+            f"CSR generated ({self._signature_algorithm}), "
+            f"private key saved to {key_path}"
+        )
         return csr.public_bytes(serialization.Encoding.PEM).decode()
 
     async def _reconnect_after_password_change(self) -> None:

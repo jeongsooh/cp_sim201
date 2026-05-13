@@ -104,6 +104,14 @@ class StationConfig:
         # surfaces as "Reported Firmware Version ... does not match value
         # from PICS" (TC_L_02_CS log).
         self.firmware_version: str = str(data.get("firmware_version", "2.1.1"))
+        # Key algorithm used by _generate_csr_pem when responding to a CSMS
+        # TriggerMessage(SignChargingStationCertificate). OCTT's "configured
+        # security algorithm" must match — sending an RSA CSR to an
+        # ECDSA-configured OCTT yields Rejected with an "algorithm mismatch"
+        # log line.
+        self.signature_algorithm: str = str(
+            data.get("signature_algorithm", "RSA")
+        ).upper()
 
         auth = data.get("basic_auth", {})
         self.basic_auth_user: str     = auth.get("user", "")
@@ -134,6 +142,10 @@ class StationConfig:
         if self.security_profile not in (0, 1, 2, 3):
             raise StationConfigError(
                 f"security_profile must be 0, 1, 2, or 3, got: {self.security_profile}"
+            )
+        if self.signature_algorithm not in ("RSA", "ECDSA"):
+            raise StationConfigError(
+                f"signature_algorithm must be 'RSA' or 'ECDSA', got: {self.signature_algorithm!r}"
             )
 
         is_tls = self.csms_url.startswith("wss://")
@@ -220,5 +232,6 @@ class StationConfig:
             f"station_id={self.station_id}, "
             f"profile={self.security_profile}, "
             f"firmware={self.firmware_version}, "
+            f"sig_alg={self.signature_algorithm}, "
             f"url={self.csms_url})"
         )

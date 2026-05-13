@@ -131,12 +131,28 @@ _VAR_VALUES_LIST: Dict[tuple, str] = {
     ("OCPPCommCtrlr", "NetworkConfigurationPriority"): "0,1,2,3",
 }
 
-# Optional maxLimit — required by OCTT for EVSE.Power (spec makes it optional,
-# but the template treats maxLimit as required-present).
+# Optional maxLimit / minLimit on variableCharacteristics. OCTT's PICS
+# validator (TC_B_53) looks up "Min/Max X supported" ORS items here
+# (otherwise the variables are reported as "cannot be found").
+# Keys are (component, variable) or (component, variable, instance) for
+# instanced variables; the more specific match wins.
 _VAR_MAX_LIMIT: Dict[tuple, float] = {
     ("EVSE", "Power"): 22000.0,
     # PICS ORS-17 — vendor-declared upper bound on installed CA certs.
     ("SecurityCtrlr", "CertificateEntries"): 5.0,
+    # PICS ORS-12 / ORS-10 / ORS-15 / ORS-8 — vendor-declared upper bounds.
+    ("OCPPCommCtrlr", "HeartbeatInterval"): 3600.0,
+    ("SampledDataCtrlr", "TxUpdatedInterval"): 3600.0,
+    ("OCPPCommCtrlr", "WebSocketPingInterval"): 30.0,
+    ("OCPPCommCtrlr", "MessageAttemptInterval", "TransactionEvent"): 5.0,
+}
+
+_VAR_MIN_LIMIT: Dict[tuple, float] = {
+    # PICS ORS-11 / ORS-9 / ORS-14 / ORS-7 — vendor-declared lower bounds.
+    ("OCPPCommCtrlr", "HeartbeatInterval"): 10.0,
+    ("SampledDataCtrlr", "TxUpdatedInterval"): 10.0,
+    ("OCPPCommCtrlr", "WebSocketPingInterval"): 120.0,
+    ("OCPPCommCtrlr", "MessageAttemptInterval", "TransactionEvent"): 1.0,
 }
 
 # OCPP 2.0.1 VariableCharacteristics: optional unit string for select variables
@@ -1628,9 +1644,22 @@ class ChargingStationController:
             values_list = _VAR_VALUES_LIST.get((comp, var))
             if values_list is not None:
                 characteristics["valuesList"] = values_list
-            max_limit = _VAR_MAX_LIMIT.get((comp, var))
+            max_limit = (
+                _VAR_MAX_LIMIT.get((comp, var, instance))
+                if instance is not None else None
+            )
+            if max_limit is None:
+                max_limit = _VAR_MAX_LIMIT.get((comp, var))
             if max_limit is not None:
                 characteristics["maxLimit"] = max_limit
+            min_limit = (
+                _VAR_MIN_LIMIT.get((comp, var, instance))
+                if instance is not None else None
+            )
+            if min_limit is None:
+                min_limit = _VAR_MIN_LIMIT.get((comp, var))
+            if min_limit is not None:
+                characteristics["minLimit"] = min_limit
             variable: Dict[str, Any] = {"name": var}
             if instance is not None:
                 variable["instance"] = instance

@@ -144,15 +144,18 @@ _VAR_MAX_LIMIT: Dict[tuple, float] = {
     ("OCPPCommCtrlr", "HeartbeatInterval"): 3600.0,
     ("SampledDataCtrlr", "TxUpdatedInterval"): 3600.0,
     ("OCPPCommCtrlr", "WebSocketPingInterval"): 30.0,
-    ("OCPPCommCtrlr", "MessageAttemptInterval", "TransactionEvent"): 5.0,
+    # PICS ORS-8 declares Max=30 (vendor doesn't tune this — fixed at 30s).
+    ("OCPPCommCtrlr", "MessageAttemptInterval", "TransactionEvent"): 30.0,
 }
 
 _VAR_MIN_LIMIT: Dict[tuple, float] = {
     # PICS ORS-11 / ORS-9 / ORS-14 / ORS-7 — vendor-declared lower bounds.
     ("OCPPCommCtrlr", "HeartbeatInterval"): 10.0,
     ("SampledDataCtrlr", "TxUpdatedInterval"): 10.0,
-    ("OCPPCommCtrlr", "WebSocketPingInterval"): 120.0,
-    ("OCPPCommCtrlr", "MessageAttemptInterval", "TransactionEvent"): 1.0,
+    # PICS ORS-14 declares Min=0 (the patched PICS — disabled is the floor).
+    ("OCPPCommCtrlr", "WebSocketPingInterval"): 0.0,
+    # PICS ORS-7 declares Min=30 (single fixed value with Max=30).
+    ("OCPPCommCtrlr", "MessageAttemptInterval", "TransactionEvent"): 30.0,
 }
 
 # OCPP 2.0.1 VariableCharacteristics: optional unit string for select variables

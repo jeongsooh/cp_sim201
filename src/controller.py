@@ -449,7 +449,7 @@ class ChargingStationController:
                 "SerialNumber":      ("SN-001",           "ReadOnly"),
                 "AvailabilityState": ("Available",        "ReadOnly"),
                 "Available":         ("true",             "ReadOnly"),
-                "SupplyPhases":      ("3",                "ReadOnly"),
+                "SupplyPhases":      ("1",                "ReadOnly"),
                 # TC_L_13_CS / §L01.FR.06-07: when false, the CS must set all
                 # Available connectors to Unavailable for the duration of a
                 # pending firmware update and refuse new sessions.
@@ -459,7 +459,7 @@ class ChargingStationController:
                 "AvailabilityState": ("Available", "ReadOnly"),
                 "Available":         ("true",      "ReadOnly"),
                 "Power":             ("7400",      "ReadOnly"),
-                "SupplyPhases":      ("3",         "ReadOnly"),
+                "SupplyPhases":      ("1",         "ReadOnly"),
             },
             "Connector": {
                 "AvailabilityState": ("Available", "ReadOnly"),
@@ -469,7 +469,7 @@ class ChargingStationController:
                 "Available":         ("true",      "ReadOnly"),
                 # PICS Hardware Feature set J6 declares cCCS1 for this EVSE.
                 "ConnectorType":     ("cCCS1",     "ReadOnly"),
-                "SupplyPhases":      ("3",         "ReadOnly"),
+                "SupplyPhases":      ("1",         "ReadOnly"),
             },
             "TokenReader": {
                 "Enabled": ("true", "ReadWrite"),

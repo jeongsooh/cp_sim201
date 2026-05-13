@@ -463,7 +463,10 @@ class ChargingStationController:
             },
             "Connector": {
                 "AvailabilityState": ("Available", "ReadOnly"),
-                "Available":         ("true",      "ReadOnly"),
+                # Connector.Available (boolean) is optional/deprecated in
+                # favour of AvailabilityState (OptionList). PICS B53 flags
+                # it as misconfigured when both are reported; keep only the
+                # OptionList variant.
                 "ConnectorType":     ("cType2",    "ReadOnly"),
                 "SupplyPhases":      ("3",         "ReadOnly"),
             },

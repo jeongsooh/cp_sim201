@@ -21,3 +21,6 @@ CODING_GUIDELINES.md
 
 # Station provisioning config (contains credentials — do not commit)
 station_config.json
+
+# Per-board backup bundles (contain private keys + credentials — never commit)
+.backup_*/

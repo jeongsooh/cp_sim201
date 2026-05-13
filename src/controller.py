@@ -463,10 +463,10 @@ class ChargingStationController:
             },
             "Connector": {
                 "AvailabilityState": ("Available", "ReadOnly"),
-                # Connector.Available (boolean) is optional/deprecated in
-                # favour of AvailabilityState (OptionList). PICS B53 flags
-                # it as misconfigured when both are reported; keep only the
-                # OptionList variant.
+                # OCPP 2.0.1 §B07 makes Connector.Available mandatory and
+                # OCTT B53 flags it as "Expected mandatory ... not received"
+                # when omitted. Keep it alongside AvailabilityState.
+                "Available":         ("true",      "ReadOnly"),
                 "ConnectorType":     ("cType2",    "ReadOnly"),
                 "SupplyPhases":      ("3",         "ReadOnly"),
             },
@@ -505,13 +505,18 @@ class ChargingStationController:
             "TxCtrlr": {
                 "TxStartPoint":             ("Authorized,EVConnected", "ReadWrite"),
                 "TxStopPoint":              ("Authorized,EVConnected", "ReadWrite"),
-                "StopTxOnEVSideDisconnect": ("true", "ReadWrite"),
+                # PICS C-06.1=No (mutually exclusive with C-06.2=Yes).
+                # Lock to ReadOnly so vendor's "option not supported" PICS
+                # declaration is mechanically backed up — OCTT B53 mapping
+                # appears to require this for the .X.1=No path.
+                "StopTxOnEVSideDisconnect": ("true", "ReadOnly"),
                 "StopTxOnInvalidId":        ("true", "ReadWrite"),
                 "EVConnectionTimeOut":      ("60",   "ReadWrite"),
             },
             "AuthCtrlr": {
-                # PICS C-48.2=Yes (no Authorize on remote start).
-                "AuthorizeRemoteStart":         ("false", "ReadWrite"),
+                # PICS now declares C-48.1=Yes (vendor requires Authorize on
+                # remote start). Match the vendor declaration.
+                "AuthorizeRemoteStart":         ("true",  "ReadWrite"),
                 "LocalAuthorizeOffline":        ("true",  "ReadWrite"),
                 "LocalPreAuthorize":            ("false", "ReadWrite"),
                 "OfflineTxForUnknownIdEnabled": ("false", "ReadWrite"),
@@ -529,7 +534,9 @@ class ChargingStationController:
                 "RetryBackOffRandomRange":          ("3",    "ReadWrite"),
                 "ResetRetries":                     ("3",    "ReadWrite"),
                 # PICS C-12.1=No (fixed-cable station — no unlock action).
-                "UnlockOnEVSideDisconnect":         ("false", "ReadWrite"),
+                # ReadOnly mirrors the "vendor doesn't expose this option"
+                # semantic so OCTT's B53 mapping matches.
+                "UnlockOnEVSideDisconnect":         ("false", "ReadOnly"),
                 # PICS ORS-16 declares 30 s; match the declared default.
                 "WebSocketPingInterval":            ("30",   "ReadWrite"),
                 "FileTransferProtocols":            ("HTTP,HTTPS", "ReadOnly"),

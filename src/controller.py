@@ -52,7 +52,8 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("AlignedDataCtrlr", "TxEndedInterval"): "integer",
     ("AlignedDataCtrlr", "Measurands"): "MemberList",
     ("AlignedDataCtrlr", "TxEndedMeasurands"): "MemberList",
-    ("HeartbeatCtrlr", "HeartbeatInterval"): "integer",
+    # OCPP 2.0.1 §K01 places HeartbeatInterval under OCPPCommCtrlr.
+    ("OCPPCommCtrlr", "HeartbeatInterval"): "integer",
     ("TxCtrlr", "StopTxOnEVSideDisconnect"): "boolean",
     ("TxCtrlr", "StopTxOnInvalidId"): "boolean",
     ("TxCtrlr", "EVConnectionTimeOut"): "integer",
@@ -98,6 +99,7 @@ _VAR_DATA_TYPES: Dict[tuple, str] = {
     ("SecurityCtrlr", "SecurityProfile"): "integer",
     ("SecurityCtrlr", "AllowCSMSTLSWildcards"): "boolean",
     ("SecurityCtrlr", "CertificateEntries"): "integer",
+    ("SecurityCtrlr", "MaxCertificateChainSize"): "integer",
     ("SecurityCtrlr", "CertSigningWaitMinimum"): "integer",
     ("SecurityCtrlr", "CertSigningRepeatTimes"): "integer",
     # TC_L_13_CS — OCPP 2.0.1 places this variable under ChargingStation.
@@ -112,15 +114,20 @@ _VAR_VALUES_LIST: Dict[tuple, str] = {
     ("EVSE", "AvailabilityState"): "Available,Occupied,Reserved,Unavailable,Faulted",
     ("Connector", "AvailabilityState"): "Available,Occupied,Reserved,Unavailable,Faulted",
     ("ClockCtrlr", "TimeSource"): "Heartbeat,NTP,RealTimeClock,MobileNetwork,RadioTimeTransmitter,GPS",
-    ("TxCtrlr", "TxStartPoint"): "ParkingBayOccupancy,EVConnected,Authorized,DataSigned,PowerPathClosed,EnergyTransfer",
-    ("TxCtrlr", "TxStopPoint"): "ParkingBayOccupancy,EVConnected,Authorized,DataSigned,PowerPathClosed,EnergyTransfer",
+    # TC_B_53_CS / PICS: only the start/stop points this vendor actually
+    # supports — keeps the valuesList a subset of the PICS-declared options
+    # (C-09.1/.2 and C-10.1/.2 = Yes; C-09.3-6 and C-10.3-5 = No).
+    ("TxCtrlr", "TxStartPoint"): "EVConnected,Authorized",
+    ("TxCtrlr", "TxStopPoint"):  "EVConnected,Authorized",
     ("SampledDataCtrlr", "TxUpdatedMeasurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
     ("SampledDataCtrlr", "TxStartedMeasurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
     ("SampledDataCtrlr", "TxEndedMeasurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
     ("AlignedDataCtrlr", "Measurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
     ("AlignedDataCtrlr", "TxEndedMeasurands"): "Current.Import,Voltage,Energy.Active.Import.Register,Power.Active.Import",
     ("SmartChargingCtrlr", "RateUnit"): "A,W",
-    ("OCPPCommCtrlr", "FileTransferProtocols"): "FTP,FTPS,HTTP,HTTPS",
+    # TC_B_53_CS / PICS ORS-24: advertise only the protocols this vendor
+    # implements, not the full spec enum.
+    ("OCPPCommCtrlr", "FileTransferProtocols"): "HTTP,HTTPS",
     ("OCPPCommCtrlr", "NetworkConfigurationPriority"): "0,1,2,3",
 }
 
@@ -128,6 +135,8 @@ _VAR_VALUES_LIST: Dict[tuple, str] = {
 # but the template treats maxLimit as required-present).
 _VAR_MAX_LIMIT: Dict[tuple, float] = {
     ("EVSE", "Power"): 22000.0,
+    # PICS ORS-17 — vendor-declared upper bound on installed CA certs.
+    ("SecurityCtrlr", "CertificateEntries"): 5.0,
 }
 
 # OCPP 2.0.1 VariableCharacteristics: optional unit string for select variables
@@ -140,7 +149,7 @@ _VAR_UNITS: Dict[tuple, str] = {
     ("OCPPCommCtrlr", "RetryBackOffWaitMinimum"): "s",
     ("OCPPCommCtrlr", "WebSocketPingInterval"): "s",
     ("TxCtrlr", "EVConnectionTimeOut"): "s",
-    ("HeartbeatCtrlr", "HeartbeatInterval"): "s",
+    ("OCPPCommCtrlr", "HeartbeatInterval"): "s",
     ("AlignedDataCtrlr", "Interval"): "s",
     ("AlignedDataCtrlr", "TxEndedInterval"): "s",
     ("SampledDataCtrlr", "TxUpdatedInterval"): "s",
@@ -471,9 +480,6 @@ class ChargingStationController:
                     "ReadWrite",
                 ),
             },
-            "HeartbeatCtrlr": {
-                "HeartbeatInterval": ("60", "ReadWrite"),
-            },
             "TxCtrlr": {
                 "TxStartPoint":             ("Authorized,EVConnected", "ReadWrite"),
                 "TxStopPoint":              ("Authorized,EVConnected", "ReadWrite"),
@@ -482,7 +488,8 @@ class ChargingStationController:
                 "EVConnectionTimeOut":      ("60",   "ReadWrite"),
             },
             "AuthCtrlr": {
-                "AuthorizeRemoteStart":         ("true",  "ReadWrite"),
+                # PICS C-48.2=Yes (no Authorize on remote start).
+                "AuthorizeRemoteStart":         ("false", "ReadWrite"),
                 "LocalAuthorizeOffline":        ("true",  "ReadWrite"),
                 "LocalPreAuthorize":            ("false", "ReadWrite"),
                 "OfflineTxForUnknownIdEnabled": ("false", "ReadWrite"),
@@ -499,9 +506,12 @@ class ChargingStationController:
                 "RetryBackOffRepeatTimes":          ("10",   "ReadWrite"),
                 "RetryBackOffRandomRange":          ("3",    "ReadWrite"),
                 "ResetRetries":                     ("3",    "ReadWrite"),
-                "UnlockOnEVSideDisconnect":         ("true", "ReadWrite"),
+                # PICS C-12.1=No (fixed-cable station — no unlock action).
+                "UnlockOnEVSideDisconnect":         ("false", "ReadWrite"),
                 "WebSocketPingInterval":            ("0",    "ReadWrite"),
                 "FileTransferProtocols":            ("HTTP,HTTPS", "ReadOnly"),
+                # OCPP 2.0.1 §K01 / PICS ORS-11/12 — under OCPPCommCtrlr.
+                "HeartbeatInterval":                ("60",   "ReadWrite"),
             },
             "LocalAuthListCtrlr": {
                 "Enabled":        ("true", "ReadWrite"),
@@ -531,6 +541,8 @@ class ChargingStationController:
                 "AllowCSMSTLSWildcards":  ("false", "ReadWrite"),
                 "OrganizationName":       ("TEST_CORP", "ReadWrite"),
                 "CertificateEntries":     ("2",   "ReadOnly"),
+                # PICS ORS-18 — required by OCTT B53 PICS validation.
+                "MaxCertificateChainSize":("10000", "ReadOnly"),
                 "BasicAuthPassword":      ("",    "WriteOnly"),
                 # TC_A_23_CS: SignCertificate → CertificateSigned 대기/재시도 정책
                 "CertSigningWaitMinimum": ("30", "ReadWrite"),
@@ -899,7 +911,7 @@ class ChargingStationController:
 
     def _apply_variable_change(self, component: str, variable: str, value: str) -> None:
         """SetVariables 수신 후 즉시 동작에 반영이 필요한 파라미터를 처리한다."""
-        if component == "HeartbeatCtrlr" and variable == "HeartbeatInterval":
+        if component == "OCPPCommCtrlr" and variable == "HeartbeatInterval":
             if self._heartbeat_task:
                 self._heartbeat_task.cancel()
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -1054,7 +1066,7 @@ class ChargingStationController:
             await self._send_availability_status_notification()
 
             interval = res.get("interval", 300)
-            self.device_model["HeartbeatCtrlr"]["HeartbeatInterval"] = (str(interval), "ReadWrite")
+            self.device_model["OCPPCommCtrlr"]["HeartbeatInterval"] = (str(interval), "ReadWrite")
             save_device_model(self.device_model)
             if not self._heartbeat_task or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -1182,7 +1194,7 @@ class ChargingStationController:
 
     async def _heartbeat_loop(self) -> None:
         while True:
-            interval = self._get_int("HeartbeatCtrlr", "HeartbeatInterval", 60)
+            interval = self._get_int("OCPPCommCtrlr", "HeartbeatInterval", 60)
             await asyncio.sleep(interval)
             try:
                 await self.ocpp_client.call("Heartbeat", {})

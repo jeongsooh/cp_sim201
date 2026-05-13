@@ -527,7 +527,8 @@ class ChargingStationController:
                 "ResetRetries":                     ("3",    "ReadWrite"),
                 # PICS C-12.1=No (fixed-cable station — no unlock action).
                 "UnlockOnEVSideDisconnect":         ("false", "ReadWrite"),
-                "WebSocketPingInterval":            ("0",    "ReadWrite"),
+                # PICS ORS-16 declares 30 s; match the declared default.
+                "WebSocketPingInterval":            ("30",   "ReadWrite"),
                 "FileTransferProtocols":            ("HTTP,HTTPS", "ReadOnly"),
                 # OCPP 2.0.1 §K01 / PICS ORS-11/12 — under OCPPCommCtrlr.
                 "HeartbeatInterval":                ("60",   "ReadWrite"),

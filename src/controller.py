@@ -467,7 +467,8 @@ class ChargingStationController:
                 # OCTT B53 flags it as "Expected mandatory ... not received"
                 # when omitted. Keep it alongside AvailabilityState.
                 "Available":         ("true",      "ReadOnly"),
-                "ConnectorType":     ("cType2",    "ReadOnly"),
+                # PICS Hardware Feature set J6 declares cCCS1 for this EVSE.
+                "ConnectorType":     ("cCCS1",     "ReadOnly"),
                 "SupplyPhases":      ("3",         "ReadOnly"),
             },
             "TokenReader": {
@@ -515,8 +516,10 @@ class ChargingStationController:
             },
             "AuthCtrlr": {
                 # PICS now declares C-48.1=Yes (vendor requires Authorize on
-                # remote start). Match the vendor declaration.
-                "AuthorizeRemoteStart":         ("true",  "ReadWrite"),
+                # remote start) and implicitly C-48.2=No; lock to ReadOnly
+                # so the unsupported option is mechanically excluded — same
+                # rule that fixed C-06.1 / C-12.1.
+                "AuthorizeRemoteStart":         ("true",  "ReadOnly"),
                 "LocalAuthorizeOffline":        ("true",  "ReadWrite"),
                 "LocalPreAuthorize":            ("false", "ReadWrite"),
                 "OfflineTxForUnknownIdEnabled": ("false", "ReadWrite"),

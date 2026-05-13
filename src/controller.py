@@ -307,11 +307,6 @@ class ChargingStationController:
         # TC_L_13_CS: remember connectors we forced to Unavailable for a
         # firmware update so we can restore them to Available after reboot.
         self._firmware_update_suspended_connectors: bool = False
-        # TC_L_13_CS: on a firmware-update reboot the CSMS expects the first
-        # availability notification to report Available even if the cable is
-        # still physically plugged. One-shot — cleared after the next call
-        # to _send_availability_status_notification.
-        self._force_available_once: bool = False
         # TC_J_03_CS: AlignedDataCtrlr.TxEndedInterval / TxEndedMeasurands —
         # clock-aligned samples are accumulated during the tx and flushed
         # into the Ended event's meterValue array with context=Sample.Clock.
@@ -1105,14 +1100,13 @@ class ChargingStationController:
                 self._pending_firmware_update_reboot = False
                 self._pending_firmware_update_request_id = None
                 self._first_connect = False
-                # TC_L_13_CS: after a firmware-update reboot the CSMS expects
-                # the connector to come back up as Available even if the
-                # cable is still physically plugged (tx ended via
-                # StopAuthorized with chargingState=EVConnected). Force the
-                # first post-boot StatusNotification to report Available.
-                self.connector_hal.status = "Available"
+                # TC_L_13_CS: after a firmware-update reboot the CSMS now
+                # expects the connector to report its live physical state
+                # (Occupied if the cable is still plugged, Available if not),
+                # not a forced Available. Resync from the HAL so the first
+                # post-boot StatusNotification matches reality.
+                self.connector_hal.status = self.connector_hal.read_physical_connection()
                 self._cable_plug_event_sent = False
-                self._force_available_once = True
                 await self.boot_routine(reason="FirmwareUpdate")
                 if fw_request_id is not None:
                     try:
@@ -1931,11 +1925,7 @@ class ChargingStationController:
         Inoperative → connectorStatus "Unavailable".
         Operative   → live physical state (Available / Occupied).
         """
-        if self._force_available_once and self.is_evse_available:
-            # TC_L_13_CS: first notification after a firmware-update reboot.
-            self.connector_hal.status = "Available"
-            self._force_available_once = False
-        elif self.is_evse_available:
+        if self.is_evse_available:
             self.connector_hal.status = self.connector_hal.read_physical_connection()
         else:
             self.connector_hal.status = "Unavailable"

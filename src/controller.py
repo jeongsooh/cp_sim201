@@ -1680,8 +1680,21 @@ class ChargingStationController:
             variable: Dict[str, Any] = {"name": var}
             if instance is not None:
                 variable["instance"] = instance
+            component_dict: Dict[str, Any] = {"name": comp}
+            # OCPP 2.0.1 §B07: Connector and EVSE components are instanced
+            # by physical position. PICS B53 keys Connector.Available off
+            # the (evseId, connectorId) tuple — without it OCTT can't match
+            # the PICS-declared EVSE/Connector pair and reports the
+            # variable as "not configured correctly".
+            if comp == "Connector":
+                component_dict["evse"] = {
+                    "id": self.evse_id,
+                    "connectorId": self.connector_id,
+                }
+            elif comp == "EVSE":
+                component_dict["evse"] = {"id": self.evse_id}
             return {
-                "component": {"name": comp},
+                "component": component_dict,
                 "variable": variable,
                 "variableAttribute": [{"type": "Actual", "value": value, "mutability": mutability}],
                 "variableCharacteristics": characteristics,

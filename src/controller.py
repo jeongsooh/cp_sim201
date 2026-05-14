@@ -1019,7 +1019,17 @@ class ChargingStationController:
 
     async def _generate_csr_pem(self) -> str:
         """Generate a CSR (RSA-2048 or ECDSA P-256 per self._signature_algorithm)
-        and save the private key for later CertificateSigned use."""
+        and stage the matching private key for later CertificateSigned use.
+
+        The new private key is written to ``client.key.pending`` (NOT the
+        live ``client.key``). It only becomes the live key after
+        handle_certificate_signed accepts the matching cert and promotes
+        the pending file via atomic rename. If the matching cert never
+        arrives or is rejected (e.g. OCTT sends an expired cert in the
+        same flow — TC_A_14_CS), the live ``client.key`` keeps its
+        previous value and stays in lock-step with ``client.crt`` for
+        mTLS handshakes.
+        """
         from cryptography import x509
         from cryptography.x509.oid import NameOID
         from cryptography.hazmat.primitives import hashes, serialization
@@ -1036,8 +1046,8 @@ class ChargingStationController:
                 lambda: rsa.generate_private_key(public_exponent=65537, key_size=2048)
             )
         os.makedirs(self._cert_dir, exist_ok=True)
-        key_path = os.path.join(self._cert_dir, "client.key")
-        with open(key_path, "wb") as f:
+        pending_key_path = os.path.join(self._cert_dir, "client.key.pending")
+        with open(pending_key_path, "wb") as f:
             f.write(key.private_bytes(
                 serialization.Encoding.PEM,
                 serialization.PrivateFormat.TraditionalOpenSSL,
@@ -1054,7 +1064,7 @@ class ChargingStationController:
         )
         logger.info(
             f"CSR generated ({self._signature_algorithm}), "
-            f"private key saved to {key_path}"
+            f"pending private key staged at {pending_key_path}"
         )
         return csr.public_bytes(serialization.Encoding.PEM).decode()
 
@@ -4143,6 +4153,18 @@ class ChargingStationController:
             logger.warning(
                 f"CertificateSigned rejected: type={cert_type} reason={reason}"
             )
+            # The CSR for the rejected cert has a private key sitting in
+            # ``client.key.pending``. Drop it so the live ``client.key``
+            # (matching the previously-accepted ``client.crt``) stays
+            # intact for the next mTLS handshake. Without this the next
+            # CSR would overwrite ``.pending`` anyway, but cleaning up
+            # avoids a stale file on disk.
+            pending_key_path = os.path.join(self._cert_dir, "client.key.pending")
+            try:
+                if os.path.exists(pending_key_path):
+                    os.remove(pending_key_path)
+            except OSError as e:
+                logger.warning(f"Failed to drop pending key after rejection: {e}")
             event_type = (
                 "InvalidChargingStationCertificate"
                 if cert_type == "ChargingStationCertificate"
@@ -4163,7 +4185,32 @@ class ChargingStationController:
             with open(cert_path, "w") as f:
                 f.write(cert_chain_pem)
             self._pending_client_cert = cert_path
-            logger.info(f"CertificateSigned: saved to {cert_path} — applies on next restart")
+            # Promote the pending CSR key now that the matching cert was
+            # accepted. Atomic rename keeps cert and key in lock-step —
+            # mTLS handshakes that present client.crt will sign with the
+            # key that generated its CSR. Without this promotion, a later
+            # CSR's pending key (overwritten by os.rename) could replace
+            # client.key while client.crt still references the older key,
+            # producing the cert/key mismatch that surfaces as
+            # ConnectionResetError during the TLS handshake (e.g. TC_A_06
+            # Phase 2). Only applies to ChargingStationCertificate — V2G
+            # flow uses its own key path.
+            if cert_type == "ChargingStationCertificate":
+                pending_key_path = os.path.join(self._cert_dir, "client.key.pending")
+                live_key_path = os.path.join(self._cert_dir, "client.key")
+                if os.path.exists(pending_key_path):
+                    os.replace(pending_key_path, live_key_path)
+                    logger.info(
+                        f"CertificateSigned: saved to {cert_path}; "
+                        f"private key promoted to {live_key_path}"
+                    )
+                else:
+                    logger.warning(
+                        f"CertificateSigned: saved to {cert_path} but no "
+                        f"pending key — live client.key may not match"
+                    )
+            else:
+                logger.info(f"CertificateSigned: saved to {cert_path}")
         except OSError as e:
             logger.error(f"CertificateSigned: failed to write file: {e}")
             return {"status": "Rejected"}

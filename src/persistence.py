@@ -18,6 +18,7 @@ _CERT_METADATA_FILE = os.path.join(_DATA_DIR, "cert_metadata.json")
 _ADMIN_STATE_FILE = os.path.join(_DATA_DIR, "admin_state.json")
 _AUTH_CACHE_FILE = os.path.join(_DATA_DIR, "auth_cache.json")
 _INSTALLED_CERTS_FILE = os.path.join(_DATA_DIR, "installed_certificates.json")
+_PENDING_RESET_FILE = os.path.join(_DATA_DIR, "pending_reset.json")
 
 
 def _ensure_data_dir() -> None:
@@ -195,3 +196,44 @@ def save_installed_certificates(certs: Dict[str, Dict]) -> None:
         )
     except Exception as e:
         logger.warning(f"Failed to save installed certificates: {e}")
+
+
+def save_pending_reset(reset_type: str) -> None:
+    """TC_A_06_CS / OCPP 2.0.1 §B12: persist the fact that a Reset was
+    Accepted right before the daemon hands control to systemd for the
+    actual reboot. The next instance reads this file in
+    consume_pending_reset() so its first BootNotification reports
+    ``reason=RemoteReset`` (Immediate) or ``reason=ScheduledReset``
+    (OnIdle), per OCPP spec.
+
+    Reset types other than Immediate / OnIdle aren't persisted.
+    """
+    _ensure_data_dir()
+    try:
+        with open(_PENDING_RESET_FILE, "w", encoding="utf-8") as f:
+            json.dump({"reset_type": reset_type}, f)
+        logger.info(f"Pending reset marker written: type={reset_type}")
+    except Exception as e:
+        logger.warning(f"Failed to write pending reset marker: {e}")
+
+
+def consume_pending_reset() -> str:
+    """Returns the reset_type if a pending-reset marker exists, then
+    removes the file so the next boot is treated as a normal PowerUp.
+    Returns an empty string when no reset is pending.
+    """
+    _ensure_data_dir()
+    if not os.path.exists(_PENDING_RESET_FILE):
+        return ""
+    try:
+        with open(_PENDING_RESET_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        reset_type = str(data.get("reset_type", ""))
+    except Exception as e:
+        logger.warning(f"Failed to read pending reset marker: {e}")
+        reset_type = ""
+    try:
+        os.remove(_PENDING_RESET_FILE)
+    except OSError as e:
+        logger.warning(f"Failed to clear pending reset marker: {e}")
+    return reset_type

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
@@ -356,6 +357,20 @@ class ChargingStationController:
         # OnIdle deferred the reboot due to an active transaction). Drives
         # the BootNotification reason: ScheduledReset vs RemoteReset.
         self._pending_reset_scheduled: bool = False
+        # TC_A_06_CS: if the previous daemon instance Accepted a Reset
+        # right before handing off to systemd, the pending-reset marker
+        # tells us which BootNotification reason to use. Restore the
+        # in-memory flags here so _on_reconnect's first iteration sends
+        # BootNotification(reason=RemoteReset/ScheduledReset) per spec.
+        from .persistence import consume_pending_reset
+        _persisted_reset_type = consume_pending_reset()
+        if _persisted_reset_type:
+            self._pending_reset = True
+            self._pending_reset_type = _persisted_reset_type
+            self._pending_reset_scheduled = (_persisted_reset_type != "Immediate")
+            logger.info(
+                f"Boot resumes after persisted Reset({_persisted_reset_type})"
+            )
         # TC_B_20/TC_B_21_CS: only switch live ws_kwargs on Reset when a
         # SetNetworkProfile has actually armed a profile switch since last boot.
         # Without this, a plain Reset would re-apply whatever slot the
@@ -1333,7 +1348,18 @@ class ChargingStationController:
         asyncio.create_task(self._execute_reset(self._pending_reset_type))
 
     async def _execute_reset(self, reset_type: str) -> None:
-        """Reset의 실제 동작: 활성 프로파일 적용 + WebSocket 종료로 재연결 유도."""
+        """Reset 실행 — Immediate면 systemd 재시작으로 진짜 reboot, OnIdle은
+        WebSocket close로 재연결만 유도.
+
+        OCPP 2.0.1 §B12 — Reset.Immediate: "The Charging Station shall
+        immediately disconnect and reboot." 단순 WS close + 재연결로는
+        OCTT TC_A_06_CS Phase 2 listener가 RST-only 모드로 머무는 것이
+        관측됐다 (Phase 2 윈도우 65~319s 동안 5번 시도 전부 RST). systemd
+        재시작으로 데몬 자체가 죽고 새로 뜨면 OCTT가 진짜 reboot으로
+        감지해 Phase 2 listener를 정상 동작시킬 가능성이 높다. 또한
+        새 데몬이 부팅하면서 자연스럽게 BootNotification(RemoteReset)을
+        송신해 TC_A_06_CS 시나리오 step 10을 충족한다.
+        """
         await asyncio.sleep(0.5)  # CallResult 전송이 끝나도록 유예
         if reset_type == "OnIdle" and self.transaction_id:
             logger.info(
@@ -1345,6 +1371,40 @@ class ChargingStationController:
         # closing the WebSocket; trigger/stopped reason = ImmediateReset.
         if reset_type == "Immediate" and self.transaction_id:
             await self.stop_transaction("ImmediateReset")
+        if reset_type == "Immediate":
+            # TC_A_06_CS: persist the pending-reset marker FIRST so the
+            # next daemon instance can pick up the correct BootNotification
+            # reason. Then hand off to systemd. systemctl will SIGTERM us
+            # within a couple of seconds; the unit's Restart=on-failure +
+            # the marker file together arrange a clean restart.
+            from .persistence import save_pending_reset
+            save_pending_reset("Immediate")
+            logger.info(
+                "Reset(Immediate): triggering systemd restart for true reboot"
+            )
+            try:
+                # Spawn detached so the child survives our exit and lets
+                # systemctl drive the stop+start cycle for cp_sim201.service.
+                subprocess.Popen(
+                    ["systemctl", "restart", "cp_sim201"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except Exception as e:
+                logger.error(
+                    f"systemctl restart failed ({e}) — falling back to ws.close()"
+                )
+                if self.ocpp_client.ws:
+                    self.ocpp_client._skip_next_reconnect_wait = True
+                    try:
+                        await self.ocpp_client.ws.close()
+                    except Exception as ex:
+                        logger.warning(f"ws.close() raised: {ex}")
+            return
+        # OnIdle path (and any other non-Immediate type) keeps the existing
+        # ws-close behaviour — TC_B_21_CS verifies this and persists test
+        # state across the reconnect without a full process restart.
         try:
             await self._apply_active_network_profile()
         except Exception as e:

@@ -600,7 +600,64 @@ class ChargingStationController:
         # Force-override SecurityProfile after load_device_model so persisted "0" can't win.
         # Mutability stays ReadOnly per OCPP 2.0.1 — SecurityProfile is changed via
         # the SetNetworkProfile + Reset flow, not directly via SetVariables.
-        self.device_model["SecurityCtrlr"]["SecurityProfile"] = (str(security_profile), "ReadOnly")
+        # If a prior SetNetworkProfile persisted an upgraded profile via
+        # operational_profile.json, honour that (OCPP 2.0.1 §A10: profile
+        # upgrade is one-way). This keeps the next BootNotification +
+        # subsequent connection settings consistent with the upgraded
+        # profile even after a true reboot.
+        from .persistence import load_operational_security_profile
+        _persisted_op_sp = load_operational_security_profile()
+        _effective_sp = max(security_profile, _persisted_op_sp)
+        self.device_model["SecurityCtrlr"]["SecurityProfile"] = (str(_effective_sp), "ReadOnly")
+        # If the operational profile is higher than what station_config
+        # supplied (typical after a TC_A_19 upgrade + reboot), rebuild the
+        # OCPPClient's ws_kwargs with the operational profile's SSL
+        # context so the next handshake presents the right cert(s) and
+        # omits the Basic Auth header (Profile 3 is mTLS-only). Without
+        # this the post-Reset daemon connects with Profile 2 settings
+        # and OCTT TC_A_06_CS Phase 2 RSTs the handshake.
+        if _persisted_op_sp > security_profile and _persisted_op_sp in (2, 3):
+            try:
+                _client_cert_path = (
+                    os.path.join(cert_dir, "client.crt")
+                    if _persisted_op_sp == 3 else ""
+                )
+                _client_key_path = (
+                    os.path.join(cert_dir, "client.key")
+                    if _persisted_op_sp == 3 else ""
+                )
+                if _persisted_op_sp == 3 and not (
+                    os.path.exists(_client_cert_path)
+                    and os.path.exists(_client_key_path)
+                ):
+                    logger.warning(
+                        f"Operational profile is {_persisted_op_sp} but "
+                        f"client cert/key missing — keeping Profile "
+                        f"{security_profile} ws_kwargs"
+                    )
+                else:
+                    from .station_config import _build_ssl_context
+                    _op_ssl = _build_ssl_context(
+                        security_profile=_persisted_op_sp,
+                        ca_cert=ca_cert,
+                        client_cert=_client_cert_path,
+                        client_key=_client_key_path,
+                    )
+                    _op_kwargs: Dict[str, Any] = {"ssl": _op_ssl}
+                    self.ocpp_client.update_connection(
+                        self.ocpp_client.server_url.rstrip("/"),
+                        _op_kwargs,
+                    )
+                    logger.info(
+                        f"Boot rebuilt ws_kwargs for persisted operational "
+                        f"profile {_persisted_op_sp} (station_config has "
+                        f"{security_profile})"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Failed to rebuild ws_kwargs for operational profile "
+                    f"{_persisted_op_sp}: {e}"
+                )
 
         # FirmwareVersion is ReadWrite for OCPP, but for our simulator the
         # config file represents the actual running firmware — override any
@@ -1528,6 +1585,15 @@ class ChargingStationController:
         self.device_model["SecurityCtrlr"]["SecurityProfile"] = (new_sp, "ReadWrite")
         self.device_model["OCPPCommCtrlr"]["ActiveNetworkProfile"] = (str(active_slot), "ReadOnly")
         save_device_model(self.device_model)
+        # TC_A_06_CS / true-reboot path: persist the operational profile so
+        # the post-Reset daemon instance starts with the right ws_kwargs
+        # (Profile 3 mTLS, no Basic Auth) and OCTT's Phase 2 listener
+        # accepts the TLS handshake. Without this, the reboot-spawned
+        # daemon falls back to station_config.security_profile and gets
+        # RST'd by OCTT for sending an Authorization header on a Profile
+        # 3 connection.
+        from .persistence import save_operational_security_profile
+        save_operational_security_profile(int(new_sp))
         logger.info(
             f"Active network profile switched: slot={active_slot} securityProfile={new_sp} url={new_url}"
         )

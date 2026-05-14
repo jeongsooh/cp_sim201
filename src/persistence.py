@@ -19,6 +19,7 @@ _ADMIN_STATE_FILE = os.path.join(_DATA_DIR, "admin_state.json")
 _AUTH_CACHE_FILE = os.path.join(_DATA_DIR, "auth_cache.json")
 _INSTALLED_CERTS_FILE = os.path.join(_DATA_DIR, "installed_certificates.json")
 _PENDING_RESET_FILE = os.path.join(_DATA_DIR, "pending_reset.json")
+_OPERATIONAL_PROFILE_FILE = os.path.join(_DATA_DIR, "operational_profile.json")
 
 
 def _ensure_data_dir() -> None:
@@ -215,6 +216,40 @@ def save_pending_reset(reset_type: str) -> None:
         logger.info(f"Pending reset marker written: type={reset_type}")
     except Exception as e:
         logger.warning(f"Failed to write pending reset marker: {e}")
+
+
+def save_operational_security_profile(profile: int) -> None:
+    """TC_A_06_CS / OCPP 2.0.1 §A10: persist a security-profile upgrade so it
+    survives the daemon process restart triggered by Reset.Immediate.
+
+    Without this, the new daemon boots with station_config.json's profile
+    (factory ship state, often 2) and connects with Basic Auth + no
+    client cert — OCTT then RSTs the TLS handshake during Phase 2 of
+    TC_A_06_CS because it expects Profile 3 mTLS. The operational
+    profile file is the single source of truth for "current" profile;
+    station_config.json keeps the factory default.
+    """
+    _ensure_data_dir()
+    try:
+        with open(_OPERATIONAL_PROFILE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"security_profile": int(profile)}, f)
+        logger.info(f"Operational security profile persisted: {profile}")
+    except Exception as e:
+        logger.warning(f"Failed to persist operational profile: {e}")
+
+
+def load_operational_security_profile() -> int:
+    """Returns the persisted operational SecurityProfile, or 0 if none."""
+    _ensure_data_dir()
+    if not os.path.exists(_OPERATIONAL_PROFILE_FILE):
+        return 0
+    try:
+        with open(_OPERATIONAL_PROFILE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return int(data.get("security_profile", 0))
+    except Exception as e:
+        logger.warning(f"Failed to read operational profile: {e}")
+        return 0
 
 
 def consume_pending_reset() -> str:

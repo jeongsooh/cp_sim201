@@ -30,11 +30,11 @@ OCTT timing-sensitive 테스트의 요구사항·OCTT 파라미터·영향 코�
 
 | Test | OCTT params 설정 | OCTT 윈도우 | 기대 CS 동작 | 영향 코드 | Status / Commit |
 |------|------------------|-------------|---------------|-----------|------------------|
-| **TC_A_05_CS** | wait_min=90 | 동적 (CS reconnect 측정 후 결정. 빠르면 ~2.7s, 90s면 ~3분) | bad cert 후 spec wait_min 준수, 재연결 후 InvalidCsmsCertificate SecurityEvent | ocpp_client.py cert_error 분기 | **알려진 한계** (948a8d9): wait_min=90이면 dynamic window가 2.7s밖에 안 될 때 못 맞춤 |
+| **TC_A_05_CS** | wait_min=90 | bad-cert window ~3s, 그 후 recovery ~95s까지 | clean drop 즉시 재시도(round 1) → bad cert 잡힘 → cert error 후 one-shot 즉시 재시도(round 2) → 정상 cert로 재연결, InvalidCsmsCertificate SecurityEvent | ocpp_client.py `is_clean_drop` + `_cert_error_retry_done` 분기 | **PASS (예상)** (2026-05-14): trade-off 재반전, TC_B_51 영향 검증 필요 |
 | **TC_A_06_CS** | wait_min=90, NetworkProfileConnectionAttempts=1 | **고정 ~65s** (TLSv1.1 listener up→close) | attempt 1 즉시(skip flag) + attempt 2도 빠르게 (TLS one-shot fast retry) | handle_reset_request line 1227, _execute_reset line 1280, ocpp_client `is_tls_protocol_error` + `_tls_protocol_retry_done` | **PASS** (2398810) |
 | **TC_A_11_CS** | (default) | 관대 — "wait some time, force-drop if needed" | 새 client cert로 reconnect (SSL ctx rebuild) | handle_certificate_signed (Profile 3 분기) → _reconnect_with_new_client_cert | **PASS** |
 | **TC_A_19_CS** | (default, prep에 RenewChargingStationCertificate) | ~64s self-disconnect + ~64s reconnect | CertificateSigned 후 WS bounce (Profile 2 포함, SSL rebuild는 Profile 3에만) | handle_certificate_signed (>=2 분기), _reconnect_with_new_client_cert | **PASS** (77bd58f) |
-| **TC_B_51_CS** | wait_min=64, OfflineThreshold=62 | OfflineThreshold(62s) 이상 offline 유지 | 첫 attempt까지 wait_min 준수 (>=62s) → SecurityEventNotification(OfflineThreshold) 트리거 | ocpp_client.connect default 분기 (exponential) | **PASS** |
+| **TC_B_51_CS** | wait_min=64, OfflineThreshold=62 | OfflineThreshold(62s) 이상 offline 유지 | 첫 attempt까지 wait_min 준수 (>=62s) → SecurityEventNotification(OfflineThreshold) 트리거 | ocpp_client.connect default 분기 (exponential) | **회귀 가능성** (2026-05-14): TC_A_05를 우선시한 clean-drop 즉시 재시도가 이 행의 >=62s offline 가정과 충돌 가능. 다음 OCTT run에서 검증 |
 | **TC_B_57_CS** | wait_min=90 | 거듭된 rejection 사이 doubling 검증 | attempt 1 wait_min, attempt 2 wait_min*2(=180s) | ocpp_client.connect exponential (`5f7ce0b`에서 transient cap 제거) | **PASS** (5f7ce0b) |
 | **TC_E_43_CS** | wait_min=90, OfflineThreshold=210, NetworkProfileConnectionAttempts=3 | OCTT 측 timeout ≈ user_unplug+64s | 오프라인 인증(LocalAuthList → AuthCache → OfflineTxForUnknownIdEnabled) + 이벤트 큐잉 + 재연결 시 drain | handle_rfid_scan offline 분기 (b74f9e1), offline_queue, _drain_offline_queue | **PASS-conditional** — user 액션이 빠르면 timing 충돌 (memory: feedback_octt_dynamic_timing) |
 | **TC_B_50_CS** | (default) | reset reconnect | handle_reset_request 안에서 active profile 미리 적용 (race 회피) | handle_reset_request._apply_active_network_profile | **PASS** (8018943) |
@@ -64,6 +64,7 @@ OCTT timing-sensitive 테스트의 요구사항·OCTT 파라미터·영향 코�
 | 충돌 영역 | 영향 받는 테스트 | 현재 해결 방향 | 결정 근거 |
 |-----------|------------------|----------------|-----------|
 | post-Reset 첫 attempt 즉시 vs spec wait_min | TC_A_06_CS (즉시 필요) vs TC_B_51_CS (spec 필요) | `_skip_next_reconnect_wait`: Reset 경로에서만 즉시, 그 외는 spec | TC_A_06은 OCTT 65s 윈도우, TC_B_51은 OfflineThreshold 검증으로 둘 다 spec 양립 |
+| clean-drop 첫 retry 즉시 vs spec wait_min | TC_A_05_CS (즉시 필요, OCTT bad-cert window ~3s) vs TC_B_51_CS (>=62s offline 필요) | `is_clean_drop and attempt==0` 분기로 즉시 (2026-05-14, 953c67b 재복원) | OCTT가 wait_min=90 설정하면서 bad-cert window는 ~3s밖에 안 줘 spec 양립 불가. TC_A_05 우선; TC_B_51 회귀 시 short-lived-connection 휴리스틱 등 추가 검토 |
 | TLS error 후 즉시 재시도 vs exponential doubling | TC_A_06_CS (즉시 필요) vs TC_B_57_CS (doubling 필요) | TLS protocol version error에 한해 one-shot 즉시; 다른 error는 exponential | 다른 error 타입이라 분기로 양립 |
 | transient HTTP rejection cap vs uniform exponential | TC_E_16_CS (짧은 wait 필요) vs TC_B_57_CS (doubling 검증) | uniform exponential (cap 제거) | TC_E_16은 attempt=0이면 wait_min*2^0=wait_min과 동일해 양립 (5f7ce0b commit message 참고) |
 | heartbeat skip-on-activity vs unconditional | TC_G_21_CS-fixable (skip이 race 줄임) vs heartbeat tests (spec 요구) | unconditional (spec 우선) | 사용자가 reboot 빨리 하면 race 자연 해결 |

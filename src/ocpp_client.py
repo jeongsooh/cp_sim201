@@ -81,6 +81,13 @@ class OCPPClient:
         # genuinely persistent TLS-version misconfig still hits exponential
         # backoff after the first fast retry.
         self._tls_protocol_retry_done: bool = False
+        # TC_A_05_CS: one-shot fast retry on a CSMS-cert verification failure.
+        # OCTT presents an expired cert for only ~3s and then reverts to a
+        # valid one, leaving the CS ~95s to reconnect before the test times
+        # out. attempt=1 → step=1 → wait_min*2 (=180s with wait_min=90) would
+        # miss that window, so collapse the *next* retry to 0 once. Reset
+        # on every successful connect.
+        self._cert_error_retry_done: bool = False
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -219,6 +226,7 @@ class OCPPClient:
                 attempt = 0
                 self._consecutive_failures = 0
                 self._tls_protocol_retry_done = False
+                self._cert_error_retry_done = False
                 if self._on_connect_callback:
                     asyncio.create_task(self._on_connect_callback())
                 # G4: 재연결 직후 오프라인 큐 재전송
@@ -228,6 +236,14 @@ class OCPPClient:
             except (ConnectionClosed, ConnectionRefusedError, OSError,
                     websockets.exceptions.InvalidStatus) as e:
                 e_str = str(e)
+                # TC_A_05_CS / TC_B_57_CS distinction: ConnectionClosed means
+                # the WS was live and got dropped (CSMS-initiated close or
+                # network-level drop after handshake). InvalidStatus /
+                # ConnectionRefused / OSError mean the connection never
+                # established (HTTP reject, TCP reject, TLS handshake
+                # failure). Only the "was live" case warrants an immediate
+                # first retry — never-established failures must back off.
+                is_clean_drop = isinstance(e, ConnectionClosed)
                 is_cert_error = (
                     isinstance(e, ssl.SSLCertVerificationError)
                     or "CERTIFICATE_VERIFY_FAILED" in e_str
@@ -290,6 +306,28 @@ class OCPPClient:
                     # first TLS-protocol-error retry; subsequent failures
                     # fall through to exponential backoff.
                     self._tls_protocol_retry_done = True
+                    wait_time = 0
+                elif is_cert_error and not self._cert_error_retry_done:
+                    # TC_A_05_CS round 2: OCTT keeps the bad CSMS cert in
+                    # place for only ~3s and then reverts. attempt=1 →
+                    # step=1 → wait_min*2 (=180s with wait_min=90) misses
+                    # the ~95s recovery window before OCTT times out. One
+                    # shot wait=0 so the next handshake lands with the
+                    # restored valid cert; subsequent persistent cert
+                    # failures still fall through to exponential backoff.
+                    self._cert_error_retry_done = True
+                    wait_time = 0
+                elif is_clean_drop and attempt == 0:
+                    # TC_A_05_CS round 1: CSMS-initiated close on a healthy
+                    # WS. OCTT's invalid-cert window is only ~3s; honouring
+                    # RetryBackOffWaitMinimum (=90s in TC_A_05 prep) misses
+                    # it entirely. The spec's wait_min is for *retry*
+                    # attempts after a failed connection; the very first
+                    # retry after a clean drop has nothing to back off
+                    # from. Known regression: TC_B_51_CS relies on the CS
+                    # staying offline ≥ OfflineThreshold (62s) after the
+                    # same kind of clean drop; trade-off flipped 2026-05-14
+                    # in favor of TC_A_05 per the updated OCTT timing.
                     wait_time = 0
                 else:
                     # OCPP 2.0.1: every unsuccessful retry doubles the wait

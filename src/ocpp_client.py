@@ -317,8 +317,21 @@ class OCPPClient:
                     # Resets on every successful connect so a genuinely
                     # persistent TLS-version misconfig still ends up in
                     # exponential backoff after this one-shot.
+                    #
+                    # Also reset the attempt counter so a failure on the
+                    # very next attempt (e.g. Phase 2 listener still
+                    # warming up after Phase 1 stop → ConnectionResetError)
+                    # restarts exponential from step=0 (wait_min, not
+                    # wait_min*4=360s). Without this reset, attempt 3 lands
+                    # at ~T+450s — well past OCTT's ~T+319s timeout —
+                    # forcing the test into "did not make a connection
+                    # attempt" FAIL even when Phase 2 becomes ready a few
+                    # seconds later. With the reset, attempt 3 lands at
+                    # ~T+185s (wait_min*2^0 = 90s) and attempt 4 at
+                    # ~T+370s, giving two chances inside the window.
                     self._tls_protocol_retry_done = True
                     wait_time = wait_min
+                    attempt = -1  # incremented to 0 at end of except block
                 elif is_cert_error and not self._cert_error_retry_done:
                     # TC_A_05_CS round 2: OCTT keeps the bad CSMS cert in
                     # place for only ~3s and then reverts. attempt=1 →

@@ -354,6 +354,20 @@ class OCPPClient:
                     # same kind of clean drop; trade-off flipped 2026-05-14
                     # in favor of TC_A_05 per the updated OCTT timing.
                     wait_time = 0
+                elif self._tls_protocol_retry_done:
+                    # TC_A_06_CS Phase 2 robustness: once we've had a TLS
+                    # protocol-version rejection and haven't successfully
+                    # connected yet, OCTT's Phase 2 listener may RST
+                    # several times before stabilising — observed window
+                    # is 65s..~319s, and listener readiness within that
+                    # window is non-deterministic. Suppress exponential
+                    # growth and keep retrying at wait_min so multiple
+                    # attempts land inside the window. The flag resets on
+                    # the next successful connect, so a genuinely
+                    # persistent TLS misconfig still escapes to
+                    # exponential after a fresh failure round (the next
+                    # time tls_protocol_retry_done is re-armed).
+                    wait_time = wait_min
                 else:
                     # OCPP 2.0.1: every unsuccessful retry doubles the wait
                     # up to RetryBackOffRepeatTimes. Applies uniformly to

@@ -73,6 +73,14 @@ class OCPPClient:
         # controller sets this just before ws.close(); the connect loop
         # consumes it on the next iteration.
         self._skip_next_reconnect_wait: bool = False
+        # TC_A_06_CS: one-shot bounded retry on a TLS-protocol-version error.
+        # After the first SSL/TLS-version rejection, fire the next attempt
+        # at exactly wait_min (not 0, not wait_min*2). Today's OCTT runs a
+        # Phase 1 TLSv1.1 listener for ~65s and a Phase 2 TLSv1.2 listener
+        # that comes up only briefly afterwards — attempt 2 needs to land
+        # in that narrow Phase 2 window. wait_min=90 puts attempt 2 at
+        # ~T+90s, just past the 65s TLSv1.1 boundary.
+        self._tls_protocol_retry_done: bool = False
         # TC_A_05_CS: one-shot fast retry on a CSMS-cert verification failure.
         # OCTT presents an expired cert for only ~3s and then reverts to a
         # valid one, leaving the CS ~95s to reconnect before the test times
@@ -217,6 +225,7 @@ class OCPPClient:
                 logger.info("Connection established.")
                 attempt = 0
                 self._consecutive_failures = 0
+                self._tls_protocol_retry_done = False
                 self._cert_error_retry_done = False
                 if self._on_connect_callback:
                     asyncio.create_task(self._on_connect_callback())
@@ -291,6 +300,17 @@ class OCPPClient:
                     # Only set by code paths that own the close.
                     self._skip_next_reconnect_wait = False
                     wait_time = 0
+                elif is_tls_protocol_error and not self._tls_protocol_retry_done:
+                    # TC_A_06_CS: one-shot retry at exactly wait_min after a
+                    # TLS-protocol-version rejection. Bypasses the doubled
+                    # exponential (step=1 → wait_min*2 = 180s) so attempt 2
+                    # lands at ~T+90s — past OCTT's 65s TLSv1.1 Phase 1
+                    # but inside the narrow Phase 2 (TLSv1.2) window.
+                    # Resets on every successful connect so a genuinely
+                    # persistent TLS-version misconfig still ends up in
+                    # exponential backoff after this one-shot.
+                    self._tls_protocol_retry_done = True
+                    wait_time = wait_min
                 elif is_cert_error and not self._cert_error_retry_done:
                     # TC_A_05_CS round 2: OCTT keeps the bad CSMS cert in
                     # place for only ~3s and then reverts. attempt=1 →

@@ -1204,6 +1204,14 @@ class ChargingStationController:
                 # send a SecurityEventNotificationRequest of type
                 # StartupOfTheDevice or ResetOrReboot.
                 await self._send_security_event_notification("ResetOrReboot")
+                # TC_A_06_CS step 14/16: if the post-Reset reconnect path
+                # observed a TLS-protocol-version rejection (attempt 1 hit
+                # the TLSv1.1 phase), report it on the recovered connection.
+                # Consume the flag so a future reconnect without a fresh
+                # TLS-version event doesn't re-fire.
+                if self.ocpp_client.tls_protocol_error_occurred:
+                    self.ocpp_client.tls_protocol_error_occurred = False
+                    await self._send_security_event_notification("InvalidTLSVersion")
             elif self._first_connect:
                 self._first_connect = False
                 await self.boot_routine(reason="PowerUp")
@@ -1211,13 +1219,18 @@ class ChargingStationController:
                 # 단순 연결 재연결(connection drop) — BootNotification 불필요, StatusNotification 전송
                 cert_error = self.ocpp_client.tls_cert_error_occurred
                 self.ocpp_client.tls_cert_error_occurred = False
+                tls_version_error = self.ocpp_client.tls_protocol_error_occurred
+                self.ocpp_client.tls_protocol_error_occurred = False
                 logger.info(
                     f"Reconnected after connection drop "
-                    f"(cert_error={cert_error}), sending StatusNotification."
+                    f"(cert_error={cert_error}, tls_version_error={tls_version_error}), "
+                    f"sending StatusNotification."
                 )
                 await self._send_availability_status_notification()
                 if cert_error:
                     await self._send_security_event_notification("InvalidCsmsCertificate")
+                if tls_version_error:
+                    await self._send_security_event_notification("InvalidTLSVersion")
         except Exception as e:
             logger.warning(f"_on_reconnect: post-connect notification failed: {e}")
 

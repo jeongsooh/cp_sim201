@@ -91,6 +91,12 @@ class OCPPClient:
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
+        # TC_A_06_CS step 14/16: after a TLSv1.1 (or any sub-1.2) Server Hello
+        # is rejected, the CS must report SecurityEventNotification of type
+        # InvalidTLSVersion on the next successful reconnect. The controller
+        # consumes-and-clears this flag in _on_reconnect, the same way it
+        # handles tls_cert_error_occurred for InvalidCsmsCertificate.
+        self.tls_protocol_error_occurred = False
         # TC_C_16_CS: when drained offline messages get a response, route it
         # back to the controller so per-action post-processing (e.g.
         # TransactionEvent idTokenInfo → deauth-stop / cache update) runs just
@@ -269,6 +275,8 @@ class OCPPClient:
                         or "UNSUPPORTED_PROTOCOL" in e_str.upper()
                     )
                 )
+                if is_tls_protocol_error:
+                    self.tls_protocol_error_occurred = True
                 logger.warning(
                     f"Connection error (cert_error={is_cert_error}, "
                     f"tls_protocol_error={is_tls_protocol_error}, "

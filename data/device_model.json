@@ -50,7 +50,7 @@
     "RetryBackOffRandomRange": "3",
     "ResetRetries": "3",
     "UnlockOnEVSideDisconnect": "true",
-    "WebSocketPingInterval": "0"
+    "WebSocketPingInterval": "30"
   },
   "LocalAuthListCtrlr": {
     "Enabled": "true"

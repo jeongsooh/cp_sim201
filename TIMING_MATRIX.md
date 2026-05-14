@@ -15,7 +15,7 @@ OCTT timing-sensitive 테스트의 요구사항·OCTT 파라미터·영향 코�
 |------|------|
 | `ocpp_client.py:connect()` except 블록 | 연결 실패 시 wait/skip 결정 |
 | `ocpp_client.py:_skip_next_reconnect_wait` | CS-initiated close 후 즉시 재연결 |
-| `ocpp_client.py:_tls_protocol_retry_done` | TLS protocol error 후 one-shot 즉시 재시도 |
+| `ocpp_client.py:_cert_error_retry_done` | CSMS cert verification 실패 후 one-shot 즉시 재시도 (TC_A_05_CS round 2) |
 | `controller.py:handle_reset_request` | Reset 후 ws.close + skip flag 무장 |
 | `controller.py:_execute_reset` | Reset 실행 (active profile 적용 후 ws.close) |
 | `controller.py:handle_certificate_signed` | cert 저장 + Profile≥2면 reconnect 트리거 |
@@ -31,7 +31,7 @@ OCTT timing-sensitive 테스트의 요구사항·OCTT 파라미터·영향 코�
 | Test | OCTT params 설정 | OCTT 윈도우 | 기대 CS 동작 | 영향 코드 | Status / Commit |
 |------|------------------|-------------|---------------|-----------|------------------|
 | **TC_A_05_CS** | wait_min=90 | bad-cert window ~3s, 그 후 recovery ~95s까지 | clean drop 즉시 재시도(round 1) → bad cert 잡힘 → cert error 후 one-shot 즉시 재시도(round 2) → 정상 cert로 재연결, InvalidCsmsCertificate SecurityEvent | ocpp_client.py `is_clean_drop` + `_cert_error_retry_done` 분기 | **PASS (예상)** (2026-05-14): trade-off 재반전, TC_B_51 영향 검증 필요 |
-| **TC_A_06_CS** | wait_min=90, NetworkProfileConnectionAttempts=1 | **고정 ~65s** (TLSv1.1 listener up→close) | attempt 1 즉시(skip flag) + attempt 2도 빠르게 (TLS one-shot fast retry) | handle_reset_request line 1227, _execute_reset line 1280, ocpp_client `is_tls_protocol_error` + `_tls_protocol_retry_done` | **PASS** (2398810) |
+| **TC_A_06_CS** | wait_min=90, NetworkProfileConnectionAttempts=1 | Phase 1 TLSv1.1 ~65s + Phase 2 TLSv1.2 ~5분 | attempt 1 즉시(skip flag, TLSv1.1 reject) + attempt 2는 exponential(180s, Phase 2 안착) | handle_reset_request, _execute_reset, ocpp_client.connect default exponential | **PASS 예상** (2026-05-14): tls fast retry 제거. 이전 2398810은 단일 65s 윈도우 가정이었음 |
 | **TC_A_11_CS** | (default) | 관대 — "wait some time, force-drop if needed" | 새 client cert로 reconnect (SSL ctx rebuild) | handle_certificate_signed (Profile 3 분기) → _reconnect_with_new_client_cert | **PASS** |
 | **TC_A_19_CS** | (default, prep에 RenewChargingStationCertificate) | ~64s self-disconnect + ~64s reconnect | CertificateSigned 후 WS bounce (Profile 2 포함, SSL rebuild는 Profile 3에만) | handle_certificate_signed (>=2 분기), _reconnect_with_new_client_cert | **PASS** (77bd58f) |
 | **TC_B_51_CS** | wait_min=64, OfflineThreshold=62 | OfflineThreshold(62s) 이상 offline 유지 | 첫 attempt까지 wait_min 준수 (>=62s) → SecurityEventNotification(OfflineThreshold) 트리거 | ocpp_client.connect default 분기 (exponential) | **회귀 가능성** (2026-05-14): TC_A_05를 우선시한 clean-drop 즉시 재시도가 이 행의 >=62s offline 가정과 충돌 가능. 다음 OCTT run에서 검증 |
@@ -65,7 +65,7 @@ OCTT timing-sensitive 테스트의 요구사항·OCTT 파라미터·영향 코�
 |-----------|------------------|----------------|-----------|
 | post-Reset 첫 attempt 즉시 vs spec wait_min | TC_A_06_CS (즉시 필요) vs TC_B_51_CS (spec 필요) | `_skip_next_reconnect_wait`: Reset 경로에서만 즉시, 그 외는 spec | TC_A_06은 OCTT 65s 윈도우, TC_B_51은 OfflineThreshold 검증으로 둘 다 spec 양립 |
 | clean-drop 첫 retry 즉시 vs spec wait_min | TC_A_05_CS (즉시 필요, OCTT bad-cert window ~3s) vs TC_B_51_CS (>=62s offline 필요) | `is_clean_drop and attempt==0` 분기로 즉시 (2026-05-14, 953c67b 재복원) | OCTT가 wait_min=90 설정하면서 bad-cert window는 ~3s밖에 안 줘 spec 양립 불가. TC_A_05 우선; TC_B_51 회귀 시 short-lived-connection 휴리스틱 등 추가 검토 |
-| TLS error 후 즉시 재시도 vs exponential doubling | TC_A_06_CS (즉시 필요) vs TC_B_57_CS (doubling 필요) | TLS protocol version error에 한해 one-shot 즉시; 다른 error는 exponential | 다른 error 타입이라 분기로 양립 |
+| TLS error 후 즉시 재시도 vs exponential doubling | TC_A_06_CS, TC_B_57_CS | 둘 다 exponential (TLS one-shot 제거, 2026-05-14) | OCTT TC_A_06이 65s 단일 윈도우에서 Phase 1(TLSv1.1 ~65s) + Phase 2(TLSv1.2 ~5분) 분리로 동작 변경됨 — attempt 2가 exponential 180s로 자연스럽게 Phase 2 안착 |
 | transient HTTP rejection cap vs uniform exponential | TC_E_16_CS (짧은 wait 필요) vs TC_B_57_CS (doubling 검증) | uniform exponential (cap 제거) | TC_E_16은 attempt=0이면 wait_min*2^0=wait_min과 동일해 양립 (5f7ce0b commit message 참고) |
 | heartbeat skip-on-activity vs unconditional | TC_G_21_CS-fixable (skip이 race 줄임) vs heartbeat tests (spec 요구) | unconditional (spec 우선) | 사용자가 reboot 빨리 하면 race 자연 해결 |
 | BootNotification.serialNumber vs cert CN | TC_A_07_CS | station_config.json `serial_number = station_id` (cert CN과 동일) | PICS에 serial 필드 없어 자유로이 정렬 가능 (f87e6a0 commit) |

@@ -307,6 +307,15 @@ class OCPPClient:
                         "PROTOCOL_VERSION" in e_str.upper()
                         or "WRONG_SSL_VERSION" in e_str.upper()
                         or "UNSUPPORTED_PROTOCOL" in e_str.upper()
+                        # OCTT's TLSv1.1-only listener (TC_A_06_CS step 2)
+                        # responds with SSLV3_ALERT_HANDSHAKE_FAILURE when
+                        # our ClientHello caps maximum_version at TLS 1.2 —
+                        # different alert from TLSV1_ALERT_PROTOCOL_VERSION
+                        # but the same semantic ("server rejects offered
+                        # TLS version"). Catch it too so the recovery
+                        # connection still emits InvalidTLSVersion per
+                        # OCPP 2.0.1 step 14/16.
+                        or "HANDSHAKE_FAILURE" in e_str.upper()
                     )
                 )
                 if is_tls_protocol_error:

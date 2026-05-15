@@ -149,6 +149,34 @@ class OCPPClient:
     ) -> None:
         self._action_handlers[action] = handler
 
+    def describe_ws_kwargs(self) -> str:
+        """Return a single-line, grep-friendly summary of what the current
+        ws_kwargs will present to the CSMS during the next handshake.
+
+        Profile-mismatch bugs (CS thinks it's Profile 3 mTLS while CSMS
+        expects Profile 2 Basic Auth, or vice versa) surface as opaque
+        HTTP 401 / ConnectionResetError without context. Logging this
+        before every connect attempt makes the mismatch visible in
+        journalctl ``security_profile=`` grep.
+        """
+        has_ssl = "ssl" in self._ws_kwargs
+        headers = self._ws_kwargs.get("additional_headers") or {}
+        has_basic_auth = "Authorization" in headers
+        # Profile inference is heuristic — the actual SecurityProfile is in
+        # device_model. ws_kwargs only tells us what we present on the wire.
+        if has_ssl and has_basic_auth:
+            likely = 2
+        elif has_ssl and not has_basic_auth:
+            likely = 3
+        elif has_basic_auth:
+            likely = 1
+        else:
+            likely = 0
+        return (
+            f"likely_security_profile={likely} ssl={has_ssl} "
+            f"basic_auth={has_basic_auth}"
+        )
+
     def update_connection(self, server_url: str, ws_kwargs: Dict[str, Any]) -> None:
         """다음 재연결부터 적용될 서버 URL과 websockets.connect kwargs를 교체한다.
 
@@ -162,7 +190,10 @@ class OCPPClient:
         # New slot starts with a fresh attempt count so the fallback threshold
         # applies per-slot (TC_B_46_CS).
         self._consecutive_failures = 0
-        logger.info(f"Connection settings updated — next reconnect will use {self.uri}")
+        logger.info(
+            f"Connection settings updated — next reconnect will use {self.uri} "
+            f"({self.describe_ws_kwargs()})"
+        )
 
     def register_on_connect(self, callback: Callable[[], Awaitable[None]]) -> None:
         self._on_connect_callback = callback
@@ -222,7 +253,10 @@ class OCPPClient:
         attempt = 0
         while self._is_running:
             try:
-                logger.info(f"Attempting connection to {self.uri}")
+                logger.info(
+                    f"Attempting connection to {self.uri} "
+                    f"({self.describe_ws_kwargs()})"
+                )
                 self.ws = await websockets.connect(
                     self.uri,
                     subprotocols=[OCPPConfig.WEBSOCKET_SUBPROTOCOL],
@@ -282,6 +316,23 @@ class OCPPClient:
                     f"tls_protocol_error={is_tls_protocol_error}, "
                     f"type={type(e).__name__}): {e_str[:300]}"
                 )
+                # Profile-mismatch diagnostic: HTTP 401 means CSMS rejected
+                # at HTTP layer despite TLS succeeding — usually a Basic
+                # Auth header / security profile mismatch. Surface what
+                # the client presented so the cause is obvious in
+                # journalctl ``security_profile=`` greps without needing
+                # to cross-reference with operational_profile.json.
+                if (
+                    isinstance(e, websockets.exceptions.InvalidStatus)
+                    and "401" in e_str
+                ):
+                    logger.warning(
+                        f"HTTP 401: CSMS rejected at HTTP layer. "
+                        f"Client presented {self.describe_ws_kwargs()}. "
+                        f"Check operational security_profile vs CSMS "
+                        f"session profile (mismatch: Basic Auth missing "
+                        f"or unexpected, or credentials wrong)."
+                    )
                 # TC_C_16_CS: drop the dead socket reference so concurrent
                 # call() paths take the offline-queue branch instead of
                 # trying to send on a half-closed ws and losing the event.

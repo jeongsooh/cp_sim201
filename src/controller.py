@@ -609,6 +609,16 @@ class ChargingStationController:
         _persisted_op_sp = load_operational_security_profile()
         _effective_sp = max(security_profile, _persisted_op_sp)
         self.device_model["SecurityCtrlr"]["SecurityProfile"] = (str(_effective_sp), "ReadOnly")
+        # Diagnostic — log every boot's effective security_profile so a
+        # mismatch between station_config and operational_profile.json
+        # surfaces in journalctl ``security_profile=`` grep before the
+        # first OCPP message goes out (and before any HTTP 401 / RST
+        # confuses the picture).
+        logger.info(
+            f"Boot effective security_profile={_effective_sp} "
+            f"(station_config={security_profile}, "
+            f"operational_profile.json={_persisted_op_sp})"
+        )
         # If the operational profile is higher than what station_config
         # supplied (typical after a TC_A_19 upgrade + reboot), rebuild the
         # OCPPClient's ws_kwargs with the operational profile's SSL

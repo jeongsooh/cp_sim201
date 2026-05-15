@@ -26,14 +26,25 @@ import time
 def blocking_read_rfid(ser) -> str:
     """Reads bytes from serial port robustly and extracts the card UID.
 
-    The reader can emit a "card-detected" frame (Cmd=0x4D, len=5) right
-    before the actual UID frame (Cmd=0x43, len=9); both end up in the
-    same UART buffer when we poll. Scan explicitly for the UID frame
-    header instead of assuming raw_hex starts with it — otherwise
-    raw_hex[8:24] straddles the two frames and yields a corrupted UID
-    (observed on TC_G_11: a card with true UID 1040009970148953 was
-    being reported as 018A2A18F1020009 because that's bytes 4..12 of
-    the 0x4D frame plus bytes 0..3 of the 0x43 frame).
+    The reader can emit two UID-bearing frame types depending on the
+    card:
+
+      Cmd 0x43 (Len=0009): 8-byte UID + tail. Used by cards with a full
+          ISO14443 / Mifare DESFire 7+1 byte UID. Header "02000943",
+          16 hex chars of UID after.
+      Cmd 0x4D (Len=0005): 4-byte UID + tail. Used by 4-byte-UID cards
+          (e.g. Mifare Classic). Header "0200054D", 8 hex chars of UID
+          after.
+
+    Some cards emit both frames in one buffered read — a 4-byte 0x4D
+    "short" representation followed by the full 0x43 UID. In that
+    case the user-registered keycode is the 8-byte value, so prefer
+    0x43 when present and fall back to 0x4D otherwise.
+
+    Old code blindly took raw_hex[8:24] which straddled adjacent
+    frames when 0x4D preceded 0x43 — observed on TC_G_11_CS where a
+    card with true UID 1040009970148953 was misreported as
+    018A2A18F1020009.
     """
     try:
         if ser and ser.in_waiting > 0:
@@ -42,24 +53,32 @@ def blocking_read_rfid(ser) -> str:
             raw_hex = data.hex().upper()
             logger.info(f"Raw UART Bytes (HEX): {raw_hex}")
 
-            # UID frame header: STX(02) + Len(0009) + Cmd(43). Then 8
-            # bytes of UID, then Tail(3D). Find the header anywhere in
-            # the buffer so a preceding 0x4D card-detected frame
-            # doesn't shift our extraction window.
-            UID_HEADER = "02000943"
-            UID_HEX_LEN = 16  # 8 bytes UID
-            idx = raw_hex.find(UID_HEADER)
-            if idx >= 0 and idx + len(UID_HEADER) + UID_HEX_LEN <= len(raw_hex):
-                card_id = raw_hex[idx + len(UID_HEADER):
-                                  idx + len(UID_HEADER) + UID_HEX_LEN]
-                logger.info(f"Extracted Card ID for Auth: {card_id}")
+            # Prefer 8-byte UID frame (0x43) if present — it's the
+            # canonical full UID for cards that have one.
+            UID8_HEADER = "02000943"
+            UID8_HEX_LEN = 16  # 8 bytes
+            idx = raw_hex.find(UID8_HEADER)
+            if idx >= 0 and idx + len(UID8_HEADER) + UID8_HEX_LEN <= len(raw_hex):
+                card_id = raw_hex[idx + len(UID8_HEADER):
+                                  idx + len(UID8_HEADER) + UID8_HEX_LEN]
+                logger.info(f"Extracted Card ID for Auth (8B): {card_id}")
                 return card_id
 
-            # No UID frame found — the buffer might be a stray
-            # card-detected event or noise. Log and skip so the
-            # controller doesn't authorize a garbage idToken.
+            # Fallback: 4-byte UID frame (0x4D), used by cards that
+            # only present a 4-byte UID.
+            UID4_HEADER = "0200054D"
+            UID4_HEX_LEN = 8  # 4 bytes
+            idx = raw_hex.find(UID4_HEADER)
+            if idx >= 0 and idx + len(UID4_HEADER) + UID4_HEX_LEN <= len(raw_hex):
+                card_id = raw_hex[idx + len(UID4_HEADER):
+                                  idx + len(UID4_HEADER) + UID4_HEX_LEN]
+                logger.info(f"Extracted Card ID for Auth (4B): {card_id}")
+                return card_id
+
+            # Neither frame found — stray data or noise. Log and skip
+            # so the controller doesn't authorize a garbage idToken.
             logger.warning(
-                f"No UID frame (header={UID_HEADER}) found in UART data — "
+                f"No UID frame (0x43 or 0x4D) found in UART data — "
                 f"ignoring scan. Raw={raw_hex}"
             )
     except Exception as e:

@@ -70,6 +70,16 @@ def _build_ssl_context(
 ) -> ssl.SSLContext:
     ctx = _NoWildcardSSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    # OCTT (post-Phase-1) advertises only TLS 1.2 ciphers in its cipher
+    # suite list (TLS_ECDHE_ECDSA_* without the TLS_AES_*_SHA* TLS 1.3
+    # entries that appear during the initial Phase 1 setup). Offering
+    # TLS 1.3 in our ClientHello during the Phase 2 acceptance window
+    # makes the listener RST the handshake instead of negotiating down.
+    # Cap our offered range at TLS 1.2 so the ClientHello matches what
+    # the OCTT acceptance listener actually parses. OCPP 2.0.1 mandates
+    # TLSv1.2+, doesn't require TLS 1.3, so this is a spec-safe
+    # workaround for the OCTT quirk surfaced in TC_A_06_CS Phase 2.
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
 
     if ca_cert:
         ctx.load_verify_locations(ca_cert)

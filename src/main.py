@@ -24,22 +24,44 @@ src.hal.HardwareAPI = STM32HardwareAPI()
 import time
 
 def blocking_read_rfid(ser) -> str:
-    """Reads bytes from serial port robustly and cleans them."""
+    """Reads bytes from serial port robustly and extracts the card UID.
+
+    The reader can emit a "card-detected" frame (Cmd=0x4D, len=5) right
+    before the actual UID frame (Cmd=0x43, len=9); both end up in the
+    same UART buffer when we poll. Scan explicitly for the UID frame
+    header instead of assuming raw_hex starts with it — otherwise
+    raw_hex[8:24] straddles the two frames and yields a corrupted UID
+    (observed on TC_G_11: a card with true UID 1040009970148953 was
+    being reported as 018A2A18F1020009 because that's bytes 4..12 of
+    the 0x4D frame plus bytes 0..3 of the 0x43 frame).
+    """
     try:
         if ser and ser.in_waiting > 0:
             time.sleep(0.1)  # Allow buffer to fill
             data = ser.read(ser.in_waiting)
             raw_hex = data.hex().upper()
             logger.info(f"Raw UART Bytes (HEX): {raw_hex}")
-            
-            # Extract the actual 8-byte Card Number from the fixed binary frame
-            # Frame: STX(02) + Len(0009) + Cmd(43) + UUID(8 bytes) + Tail(3D) -> Example: 02000943 1040009970148953 3D
-            card_id = raw_hex
-            if raw_hex.startswith("02") and len(raw_hex) >= 24:
-                card_id = raw_hex[8:24]
+
+            # UID frame header: STX(02) + Len(0009) + Cmd(43). Then 8
+            # bytes of UID, then Tail(3D). Find the header anywhere in
+            # the buffer so a preceding 0x4D card-detected frame
+            # doesn't shift our extraction window.
+            UID_HEADER = "02000943"
+            UID_HEX_LEN = 16  # 8 bytes UID
+            idx = raw_hex.find(UID_HEADER)
+            if idx >= 0 and idx + len(UID_HEADER) + UID_HEX_LEN <= len(raw_hex):
+                card_id = raw_hex[idx + len(UID_HEADER):
+                                  idx + len(UID_HEADER) + UID_HEX_LEN]
                 logger.info(f"Extracted Card ID for Auth: {card_id}")
-                
-            return card_id
+                return card_id
+
+            # No UID frame found — the buffer might be a stray
+            # card-detected event or noise. Log and skip so the
+            # controller doesn't authorize a garbage idToken.
+            logger.warning(
+                f"No UID frame (header={UID_HEADER}) found in UART data — "
+                f"ignoring scan. Raw={raw_hex}"
+            )
     except Exception as e:
         logger.error(f"Serial read error: {e}")
     return ""

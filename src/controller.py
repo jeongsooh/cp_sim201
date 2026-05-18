@@ -2981,6 +2981,14 @@ class ChargingStationController:
                     self._tx_group_id_token_value = group_id
                     self.power_contactor_hal.control_relay("Close")
                     await self._send_tx_updated("Authorized", id_token=id_token)
+                    # TC_J_07_CS: mirror of simulate_cable_plugged()'s
+                    # software fallback (controller.py handle_state_c call).
+                    # ADC State-C dip is non-deterministic, so once
+                    # authorization closes the relay on an already-plugged
+                    # cable, drive ChargingStateChanged=Charging from
+                    # software instead of waiting for cp_adc_monitor.
+                    if not self._state_c_active:
+                        await self.handle_state_c()
             else:
                 # TC_C_02_CS / TC_C_07_CS: per OCPP 2.0.1 §C02, when Authorize
                 # is rejected (Expired / Invalid / Unknown / Blocked ...) the

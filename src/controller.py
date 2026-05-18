@@ -426,6 +426,15 @@ class ChargingStationController:
         # value: {"certificateType": str, "certificateHashData": dict, "pem_path": str}
         # TC_M_23_CS: persist across service restarts.
         self.installed_certificates: Dict[str, Dict] = load_installed_certificates()
+        # In-memory cache of the active CA trust anchor PEM. Boot reads
+        # _ca_cert once into this string; SSL-context rebuilds (e.g. the
+        # CertificateSigned bounce in _reconnect_with_new_client_cert)
+        # use this PEM rather than reopening the file. TC_M_23_CS: OCTT
+        # routinely InstallCertificate(CSMSRootCertificate) followed by
+        # DeleteCertificate on the same serial, deleting the on-disk PEM
+        # mid-session. The in-memory cache keeps rebuilds working through
+        # that gap; InstallCertificate handlers refresh it.
+        self._ca_cert_pem: Optional[str] = None
         # TC_M_23_CS: auto-register the station_config CA cert as a
         # CSMSRootCertificate on startup. Without it, GetInstalledCertificateIds
         # returns NotFound and the test ERRORs because OCTT has no target to
@@ -434,6 +443,7 @@ class ChargingStationController:
             try:
                 with open(self._ca_cert, "r", encoding="utf-8") as f:
                     ca_pem = f.read()
+                self._ca_cert_pem = ca_pem
                 hash_data = self._make_cert_hash_data(ca_pem)
                 serial = hash_data["serialNumber"]
                 if serial not in self.installed_certificates:
@@ -863,7 +873,8 @@ class ChargingStationController:
             logger.warning(f"Fallback slot {next_slot} missing ocppCsmsUrl; keeping current")
             return
         ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
-            profile, self._cert_dir, self._ca_cert
+            profile, self._cert_dir, self._ca_cert,
+            ca_cert_data=self._ca_cert_pem,
         )
         new_sp_int = int(profile.get("securityProfile", 0))
         if (
@@ -1572,7 +1583,8 @@ class ChargingStationController:
             return
 
         ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
-            profile, self._cert_dir, self._ca_cert
+            profile, self._cert_dir, self._ca_cert,
+            ca_cert_data=self._ca_cert_pem,
         )
         # TC_B_45_CS: SetNetworkProfile often omits basicAuth when switching to
         # another slot on the same CSMS root — the station is expected to
@@ -4239,6 +4251,13 @@ class ChargingStationController:
             "pem_path":           cert_path,
         }
         save_installed_certificates(self.installed_certificates)
+        # TC_M_23_CS: refresh the in-memory CA trust anchor when OCTT
+        # installs a new CSMSRootCertificate. Subsequent SSL-context
+        # rebuilds (CertificateSigned bounce, SetNetworkProfile) will
+        # use this PEM and remain valid even if OCTT later deletes the
+        # on-disk file in the same test sequence.
+        if cert_type == "CSMSRootCertificate":
+            self._ca_cert_pem = pem
         logger.info(f"InstallCertificate: type={cert_type} serial={serial} path={cert_path}")
         return {"status": "Accepted"}
 
@@ -4432,12 +4451,21 @@ class ChargingStationController:
                 }
                 ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
                     profile, self._cert_dir, self._ca_cert,
+                    ca_cert_data=self._ca_cert_pem,
                 )
                 self.ocpp_client.update_connection(current_url, ws_kwargs)
                 logger.info("New client cert installed — bouncing WS to reconnect with it")
             except Exception as e:
-                logger.error(f"Failed to rebuild SSL context after CertificateSigned: {e}")
-                return
+                # TC_M_23_CS: OCTT enforces a ~64s post-CertificateSigned
+                # disconnect-reconnect window. Skipping ws.close() here means
+                # OCTT force-drops and the resumed link uses the stale in-memory
+                # SSL context (old client cert) → cert mismatch FAIL. Closing
+                # WS anyway can't repair the rebuild failure but turns a
+                # silent 64s hang into an immediate diagnosable reconnect.
+                logger.error(
+                    f"Failed to rebuild SSL context after CertificateSigned: {e} — "
+                    f"closing WS anyway to honour OCTT's reconnect window"
+                )
         else:
             logger.info(
                 f"CertificateSigned (profile={security_profile}) — bouncing WS "

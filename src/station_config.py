@@ -3,7 +3,7 @@ import ssl
 import base64
 import logging
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,18 @@ def _build_ssl_context(
     ca_cert: str,
     client_cert: str,
     client_key: str,
+    ca_cert_data: Optional[str] = None,
 ) -> ssl.SSLContext:
+    """Build an SSL context for OCPP Profile 2/3 connections.
+
+    ca_cert_data, when given, takes precedence over ca_cert (a filesystem
+    path). This lets callers anchor trust on an in-memory PEM cached at
+    boot, immune to OCPP runtime cert lifecycle: TC_M_23_CS exposed that
+    OCTT issues DeleteCertificate on the CSMSRootCertificate moments
+    before CertificateSigned forces an SSL context rebuild, so the file
+    path read at rebuild time can hit FileNotFoundError. The in-memory
+    PEM keeps rebuilds deterministic regardless of disk state.
+    """
     ctx = _NoWildcardSSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     # OCTT (post-Phase-1) advertises only TLS 1.2 ciphers in its cipher
@@ -81,7 +92,9 @@ def _build_ssl_context(
     # workaround for the OCTT quirk surfaced in TC_A_06_CS Phase 2.
     ctx.maximum_version = ssl.TLSVersion.TLSv1_2
 
-    if ca_cert:
+    if ca_cert_data:
+        ctx.load_verify_locations(cadata=ca_cert_data)
+    elif ca_cert:
         ctx.load_verify_locations(ca_cert)
     else:
         ctx.load_default_certs()
@@ -200,7 +213,12 @@ class StationConfig:
         )
 
     @staticmethod
-    def build_ws_kwargs_from_profile(profile: Dict[str, Any], cert_dir: str, ca_cert: str) -> Dict[str, Any]:
+    def build_ws_kwargs_from_profile(
+        profile: Dict[str, Any],
+        cert_dir: str,
+        ca_cert: str,
+        ca_cert_data: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """SetNetworkProfile로 수신한 connectionData에서 websockets.connect() kwargs를 생성한다.
 
         profile schema는 OCPP SetNetworkProfileRequest의 connectionData 일부:
@@ -210,6 +228,10 @@ class StationConfig:
 
         CSR/CertificateSigned로 저장된 기본 client cert 경로는
         cert_dir/client.crt, cert_dir/client.key를 사용한다 (Profile 3).
+
+        ca_cert_data: in-memory CA PEM. When provided, takes precedence
+        over ca_cert (filesystem path) — see _build_ssl_context docstring
+        for the TC_M_23_CS rationale.
         """
         sp = int(profile.get("securityProfile", 0))
         kwargs: Dict[str, Any] = {}
@@ -222,6 +244,7 @@ class StationConfig:
                 ca_cert=ca_cert,
                 client_cert=client_cert,
                 client_key=client_key,
+                ca_cert_data=ca_cert_data,
             )
 
         if sp in (1, 2):

@@ -92,7 +92,7 @@ async def rfid_monitor(controller: ChargingStationController) -> None:
     port = "/dev/ttySTM6"
     baudrate = 9600
     logger.info(f"Starting RFID UART monitor on {port} (Baud: {baudrate})")
-    
+
     try:
         import serial
         ser = serial.Serial(port, baudrate, timeout=1)
@@ -104,18 +104,31 @@ async def rfid_monitor(controller: ChargingStationController) -> None:
         logger.warning("RFID monitor cannot start hardware loop.")
         ser = None
 
+    # TC_C_39_CS: presence-based dedup. The reader keeps emitting the same UID
+    # frame while a tag stays in the field, so a single "tap" that lasts >2s
+    # used to bypass the time-based dedup in handle_rfid_scan and fire a
+    # second AuthorizeRequest after stop_transaction had cleared transaction
+    # state — OCTT saw it during the post-stop unplug window and rejected it.
+    # Suppress consecutive same-UID emissions until an empty read confirms
+    # the field has cleared (i.e. the user actually lifted the tag).
+    last_uid_emitted = None
     while True:
         await asyncio.sleep(0.5) # Poll interval
         try:
             if ser:
                 uid = await asyncio.to_thread(blocking_read_rfid, ser)
                 if uid:
+                    if uid == last_uid_emitted:
+                        continue
+                    last_uid_emitted = uid
                     logger.info(f"=====================================")
                     logger.info(f"   RFID TAG SCANNED: [{uid}]")
                     logger.info(f"=====================================")
                     # Handles AuthorizeRequest internally and triggers
                     # a transaction if accepted by CSMS and connector is plugged.
                     await controller.handle_rfid_scan(uid)
+                else:
+                    last_uid_emitted = None
         except Exception as e:
             logger.error(f"RFID monitor iteration failed: {e}", exc_info=True)
 

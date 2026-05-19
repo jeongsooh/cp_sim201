@@ -61,6 +61,47 @@ _DEFAULT_CONFIG_PATH = os.path.join(
     "station_config.json",
 )
 
+# Shadow copy of the boot CA. OCTT runs cert-management cases that
+# DeleteCertificate the on-disk CSMSRootCertificate.pem (which is also
+# station_config.tls.ca_cert) and may then trigger Reset(Immediate) —
+# the resulting systemd-driven daemon restart can't find the primary
+# file and used to crash-loop. Every successful primary load refreshes
+# this shadow, and a missing primary triggers fallback to the shadow.
+# Lives under data/ which is outside the OCPP-managed cert_dir.
+_BOOT_CA_SHADOW = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "boot_ca.pem",
+)
+
+
+def _load_ca_pem(ca_cert_path: str) -> str:
+    """Resolve a usable CA PEM from the configured path with shadow fallback.
+
+    Returns the PEM content as a string. Raises FileNotFoundError only when
+    neither the configured path nor the shadow holds a readable cert.
+    """
+    if os.path.exists(ca_cert_path):
+        with open(ca_cert_path, "r", encoding="utf-8") as f:
+            pem = f.read()
+        try:
+            os.makedirs(os.path.dirname(_BOOT_CA_SHADOW), exist_ok=True)
+            with open(_BOOT_CA_SHADOW, "w", encoding="utf-8") as f:
+                f.write(pem)
+        except OSError as e:
+            logger.warning(f"Failed to refresh boot CA shadow {_BOOT_CA_SHADOW}: {e}")
+        return pem
+    if os.path.exists(_BOOT_CA_SHADOW):
+        logger.warning(
+            f"Primary ca_cert {ca_cert_path} missing — "
+            f"falling back to boot CA shadow {_BOOT_CA_SHADOW}"
+        )
+        with open(_BOOT_CA_SHADOW, "r", encoding="utf-8") as f:
+            return f.read()
+    raise FileNotFoundError(
+        f"ca_cert '{ca_cert_path}' and boot CA shadow "
+        f"'{_BOOT_CA_SHADOW}' both missing — cannot build SSL context"
+    )
+
 
 def _build_ssl_context(
     security_profile: int,
@@ -95,7 +136,10 @@ def _build_ssl_context(
     if ca_cert_data:
         ctx.load_verify_locations(cadata=ca_cert_data)
     elif ca_cert:
-        ctx.load_verify_locations(ca_cert)
+        # _load_ca_pem handles the OCTT delete-cycle case where the
+        # primary file is gone post-restart: it falls back to a
+        # shadow copy refreshed on every successful primary load.
+        ctx.load_verify_locations(cadata=_load_ca_pem(ca_cert))
     else:
         ctx.load_default_certs()
 

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 import uuid
 import random
 import os
@@ -94,6 +95,12 @@ class OCPPClient:
         # window). Controller wires the OfflineThreshold-vs-wait_min check
         # in __init__. Default None → spec-compliant wait_min (safer).
         self._clean_drop_fast_retry_provider: Optional[Callable[[], bool]] = None
+        # TC_A_05_CS retry-burst window: when the clean-drop fast retry fires
+        # we stay in 1s-retry mode for a short window so subsequent failures
+        # (OSError while OCTT is mid cert-swap, repeat cert_errors after the
+        # one-shot _cert_error_retry_done is consumed) don't fall back to
+        # exponential and miss OCTT's ~3s bad-cert phase.
+        self._fast_retry_until: float = 0.0
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -293,6 +300,7 @@ class OCPPClient:
                 self._consecutive_failures = 0
                 self._tls_protocol_retry_done = False
                 self._cert_error_retry_done = False
+                self._fast_retry_until = 0.0
                 if self._on_connect_callback:
                     asyncio.create_task(self._on_connect_callback())
                 # G4: 재연결 직후 오프라인 큐 재전송
@@ -448,6 +456,19 @@ class OCPPClient:
                     # the predicate returns False → falls through to the
                     # spec-compliant else branch and waits wait_min.
                     wait_time = 0
+                    self._fast_retry_until = time.monotonic() + 10.0
+                elif time.monotonic() < self._fast_retry_until:
+                    # TC_A_05_CS retry-burst: OCTT closes, switches to the
+                    # bad-cert keystore (~30ms), and the first CS retry
+                    # often hits the brief gap with ECONNREFUSED before the
+                    # new TLS listener binds. Without this window the next
+                    # attempt falls into the exponential else branch and
+                    # waits wait_min*2 = 180s — well past OCTT's 3s window
+                    # → cert error never observed → no
+                    # SecurityEventNotification. Stay at 1s retries until
+                    # either a successful connect resets the window or it
+                    # naturally expires.
+                    wait_time = 1
                 elif self._tls_protocol_retry_done:
                     # TC_A_06_CS Phase 2 robustness: once we've had a TLS
                     # protocol-version rejection and haven't successfully

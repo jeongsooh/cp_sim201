@@ -2847,10 +2847,16 @@ class ChargingStationController:
             return
         self._last_rfid_uid = raw_uid
         self._last_rfid_scan_at = now
-        # OCTT TC_C_02 etc. issue KeyCode-typed tokens — the hex UID from the
-        # RFID reader is a keycode string as far as OCPP is concerned. Keep
-        # type as "KeyCode" so the authorize payload matches OCTT expectations.
-        id_token = {"idToken": raw_uid, "type": "KeyCode"}
+        # OCTT chooses idToken type per test variant. Our RFID reader emits
+        # two UID frame types — 0x4D (4-byte Mifare Classic, 8 hex chars)
+        # and 0x43 (8-byte UID, 16 hex chars). OCTT uses Mifare Classic
+        # cards for ISO14443 variants (TC_E_04_CS_ISO14443: 52428DBA) and
+        # longer UIDs for KeyCode variants where the test reuses a card
+        # to simulate a typed PIN (TC_J_07_CS / TC_C_32_CS:
+        # 1040009970148953). The CS has no keypad to distinguish "swiped"
+        # vs "typed", so UID byte-length is the only signal we have.
+        id_token_type = "ISO14443" if len(raw_uid) == 8 else "KeyCode"
+        id_token = {"idToken": raw_uid, "type": id_token_type}
         # TC_B_21_CS / TC_C_04_CS: handling a second scan while an authorized
         # transaction is live depends on whether the new idToken matches the
         # one that started the transaction.

@@ -88,6 +88,12 @@ class OCPPClient:
         # miss that window, so collapse the *next* retry to 0 once. Reset
         # on every successful connect.
         self._cert_error_retry_done: bool = False
+        # TC_A_05 vs TC_B_51 trade-off: predicate consulted on the first
+        # reconnect attempt after a clean WS close to decide between fast
+        # retry (TC_A_05's ~3s cert window) and wait_min (TC_B_51's offline
+        # window). Controller wires the OfflineThreshold-vs-wait_min check
+        # in __init__. Default None → spec-compliant wait_min (safer).
+        self._clean_drop_fast_retry_provider: Optional[Callable[[], bool]] = None
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -235,6 +241,26 @@ class OCPPClient:
         self, handler: Optional[Callable[[int], None]]
     ) -> None:
         self._connection_failure_handler = handler
+
+    def set_clean_drop_fast_retry_provider(
+        self, provider: Optional[Callable[[], bool]]
+    ) -> None:
+        """Predicate consulted on the first reconnect after a clean WS close.
+        Return True to retry immediately (TC_A_05 cert-window scenario),
+        False to honour wait_min (TC_B_51 offline-window scenario)."""
+        self._clean_drop_fast_retry_provider = provider
+
+    def _should_fast_retry_on_clean_drop(self) -> bool:
+        if self._clean_drop_fast_retry_provider is None:
+            return False
+        try:
+            return bool(self._clean_drop_fast_retry_provider())
+        except Exception as e:
+            logger.warning(
+                f"clean_drop_fast_retry_provider failed, defaulting to "
+                f"spec-compliant wait_min: {e}"
+            )
+            return False
 
     def _retry_config(self) -> Tuple[int, int, int]:
         if self._retry_config_provider is not None:
@@ -401,6 +427,26 @@ class OCPPClient:
                     # restored valid cert; subsequent persistent cert
                     # failures still fall through to exponential backoff.
                     self._cert_error_retry_done = True
+                    wait_time = 0
+                elif (
+                    is_clean_drop
+                    and attempt == 0
+                    and self._should_fast_retry_on_clean_drop()
+                ):
+                    # TC_A_05_CS round 1: CSMS swaps its server cert to an
+                    # invalid one and cleanly closes the WS; the bad-cert
+                    # window is only ~3s, so the very first retry must land
+                    # inside it for the cert_error branch above to fire on
+                    # the FOLLOWING attempt. Honouring wait_min here (=90s
+                    # in TC_A_05 prep) misses the window entirely and the
+                    # CS never observes the bad cert → no
+                    # SecurityEventNotification → test fails.
+                    #
+                    # Controller's provider narrows this to the TC_A_05
+                    # scenario by checking OfflineThreshold > wait_min.
+                    # TC_B_51_CS sets OfflineThreshold=62 ≤ wait_min=64 so
+                    # the predicate returns False → falls through to the
+                    # spec-compliant else branch and waits wait_min.
                     wait_time = 0
                 elif self._tls_protocol_retry_done:
                     # TC_A_06_CS Phase 2 robustness: once we've had a TLS

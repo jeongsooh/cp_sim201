@@ -515,6 +515,16 @@ class OCPPClient:
                     # up to RetryBackOffRepeatTimes. Applies uniformly to
                     # ConnectionClosed, network errors, and HTTP rejections
                     # (TC_B_57_CS verifies the doubling on repeated reject).
+                    if self._fast_retry_until > 0.0:
+                        # Just exited a cert-recovery burst (TC_A_05): the
+                        # attempt counter accumulated during 1s retries has
+                        # no exponential meaning — every retry waited the
+                        # same 1s. Reset so this branch starts from
+                        # wait_min*2^0 instead of wait_min*2^N (observed
+                        # N=95 in one TC_A_05 run, which would land at
+                        # ~92160s ≈ 25h on the next failure).
+                        attempt = 0
+                        self._fast_retry_until = 0.0
                     step = min(attempt, repeat_times)
                     wait_time = (
                         wait_min * (2 ** step)

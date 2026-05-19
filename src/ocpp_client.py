@@ -402,18 +402,6 @@ class OCPPClient:
                     # failures still fall through to exponential backoff.
                     self._cert_error_retry_done = True
                     wait_time = 0
-                elif is_clean_drop and attempt == 0:
-                    # TC_A_05_CS round 1: CSMS-initiated close on a healthy
-                    # WS. OCTT's invalid-cert window is only ~3s; honouring
-                    # RetryBackOffWaitMinimum (=90s in TC_A_05 prep) misses
-                    # it entirely. The spec's wait_min is for *retry*
-                    # attempts after a failed connection; the very first
-                    # retry after a clean drop has nothing to back off
-                    # from. Known regression: TC_B_51_CS relies on the CS
-                    # staying offline ≥ OfflineThreshold (62s) after the
-                    # same kind of clean drop; trade-off flipped 2026-05-14
-                    # in favor of TC_A_05 per the updated OCTT timing.
-                    wait_time = 0
                 elif self._tls_protocol_retry_done:
                     # TC_A_06_CS Phase 2 robustness: once we've had a TLS
                     # protocol-version rejection and haven't successfully

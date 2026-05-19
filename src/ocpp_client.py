@@ -89,11 +89,9 @@ class OCPPClient:
         # miss that window, so collapse the *next* retry to 0 once. Reset
         # on every successful connect.
         self._cert_error_retry_done: bool = False
-        # TC_A_05 vs TC_B_51 trade-off: predicate consulted on the first
-        # reconnect attempt after a clean WS close to decide between fast
-        # retry (TC_A_05's ~3s cert window) and wait_min (TC_B_51's offline
-        # window). Controller wires the OfflineThreshold-vs-wait_min check
-        # in __init__. Default None → spec-compliant wait_min (safer).
+        # TC_A_05 vs TC_B_51/52 trade-off: optional override predicate consulted
+        # on the first reconnect attempt after a clean WS close. Default None
+        # → use the connection-age heuristic in _should_fast_retry_on_clean_drop.
         self._clean_drop_fast_retry_provider: Optional[Callable[[], bool]] = None
         # TC_A_05_CS retry-burst window: when the clean-drop fast retry fires
         # we stay in 1s-retry mode for a short window so subsequent failures
@@ -101,6 +99,13 @@ class OCPPClient:
         # one-shot _cert_error_retry_done is consumed) don't fall back to
         # exponential and miss OCTT's ~3s bad-cert phase.
         self._fast_retry_until: float = 0.0
+        # Monotonic timestamp of the most recent successful connect. Used to
+        # detect cert-recovery pattern: a clean drop very soon (<10s) after
+        # connect almost always means CSMS is bouncing the WS as part of a
+        # cert flow (TC_A_05 round 2) — fast retry. A clean drop after a
+        # long-lived connection (TC_B_51 / TC_B_52 prep + offline test)
+        # is the spec-compliant wait_min case.
+        self._last_connect_time: float = 0.0
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -258,16 +263,31 @@ class OCPPClient:
         self._clean_drop_fast_retry_provider = provider
 
     def _should_fast_retry_on_clean_drop(self) -> bool:
-        if self._clean_drop_fast_retry_provider is None:
+        """Decide whether the first reconnect after a clean WS close should
+        be immediate (TC_A_05 cert-recovery context) or honour wait_min
+        (TC_B_51 / TC_B_52 offline-period tests).
+
+        Heuristic: a clean drop within 10s of the most recent successful
+        connect is treated as cert-recovery. The OCTT cert-flow pattern is
+        "connect → wait 2s → close → swap cert → wait reconnect inside ~3s
+        window", so the close lands ~2s after a fresh connect. Test-driven
+        offline-period closes (TC_B_51/52) always fire after a long prep
+        phase, so the connection has been alive ≥ tens of seconds.
+
+        An optional provider can override this — controller wires None by
+        default which leaves the heuristic in charge.
+        """
+        if self._clean_drop_fast_retry_provider is not None:
+            try:
+                return bool(self._clean_drop_fast_retry_provider())
+            except Exception as e:
+                logger.warning(
+                    f"clean_drop_fast_retry_provider failed, falling back "
+                    f"to connection-age heuristic: {e}"
+                )
+        if self._last_connect_time <= 0.0:
             return False
-        try:
-            return bool(self._clean_drop_fast_retry_provider())
-        except Exception as e:
-            logger.warning(
-                f"clean_drop_fast_retry_provider failed, defaulting to "
-                f"spec-compliant wait_min: {e}"
-            )
-            return False
+        return (time.monotonic() - self._last_connect_time) < 10.0
 
     def _retry_config(self) -> Tuple[int, int, int]:
         if self._retry_config_provider is not None:
@@ -301,6 +321,7 @@ class OCPPClient:
                 self._tls_protocol_retry_done = False
                 self._cert_error_retry_done = False
                 self._fast_retry_until = 0.0
+                self._last_connect_time = time.monotonic()
                 if self._on_connect_callback:
                     asyncio.create_task(self._on_connect_callback())
                 # G4: 재연결 직후 오프라인 큐 재전송

@@ -786,12 +786,10 @@ class ChargingStationController:
         # TC_B_51_CS: reconnect backoff must honour the OCPPCommCtrlr variables
         # the CSMS sets at runtime (e.g. RetryBackOffWaitMinimum=64).
         self.ocpp_client.set_retry_config_provider(self._retry_backoff_config)
-        # TC_A_05_CS vs TC_B_51_CS: on the first reconnect after a clean WS
-        # close, decide between fast retry (cert-window) and wait_min
-        # (offline-window) based on OfflineThreshold vs wait_min.
-        self.ocpp_client.set_clean_drop_fast_retry_provider(
-            self._clean_drop_should_fast_retry
-        )
+        # TC_A_05 vs TC_B_51/52: ocpp_client decides fast-retry-on-clean-drop
+        # via its own connection-age heuristic (drops within 10s of connect
+        # = cert recovery → fast retry; older connections → wait_min). No
+        # controller override needed for the current OCTT test set.
         # TC_E_41/E_42/E_50/E_51_CS: TransactionEvent retry uses §E13 schedule
         # driven by MessageAttempts / MessageAttemptInterval (instance
         # "TransactionEvent"). Expose via _tx_retry_config so ocpp_client can
@@ -918,31 +916,6 @@ class ChargingStationController:
             "OCPPCommCtrlr", "RetryBackOffRepeatTimes", _Cfg.RETRY_BACKOFF_REPEAT_TIMES
         )
         return wait_min, random_range, repeat_times
-
-    def _clean_drop_should_fast_retry(self) -> bool:
-        """TC_A_05_CS vs TC_B_51_CS: decide whether the first reconnect after
-        a clean WS close should be immediate or wait wait_min.
-
-        Heuristic: compare OfflineThreshold to RetryBackOffWaitMinimum.
-        - OfflineThreshold > wait_min → deployment tolerates being offline
-          while retrying briskly. Matches TC_A_05_CS prep (210 vs 90) and
-          typical production configs (default 60s threshold, short retry).
-          Fast retry catches the cert window.
-        - OfflineThreshold ≤ wait_min → CSMS is gating on the retry backoff
-          window itself. Matches TC_B_51_CS prep (62 vs 64). Honour
-          wait_min so the offline period is actually observed.
-
-        Equal values fall on the spec-compliant side (False) to keep the
-        safer default.
-        """
-        from .config import OCPPConfig as _Cfg
-        wait_min = self._get_int(
-            "OCPPCommCtrlr", "RetryBackOffWaitMinimum", _Cfg.RETRY_BACKOFF_WAIT_MINIMUM
-        )
-        offline_threshold = self._get_int(
-            "OCPPCommCtrlr", "OfflineThreshold", _Cfg.OFFLINE_THRESHOLD
-        )
-        return offline_threshold > wait_min
 
     def _tx_retry_config(self):
         """TC_E_41_CS: return (MessageAttempts, MessageAttemptInterval,

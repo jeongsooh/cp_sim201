@@ -426,15 +426,21 @@ class ChargingStationController:
         # value: {"certificateType": str, "certificateHashData": dict, "pem_path": str}
         # TC_M_23_CS: persist across service restarts.
         self.installed_certificates: Dict[str, Dict] = load_installed_certificates()
-        # In-memory cache of the active CA trust anchor PEM. Boot reads
-        # _ca_cert once into this string; SSL-context rebuilds (e.g. the
-        # CertificateSigned bounce in _reconnect_with_new_client_cert)
-        # use this PEM rather than reopening the file. TC_M_23_CS: OCTT
-        # routinely InstallCertificate(CSMSRootCertificate) followed by
-        # DeleteCertificate on the same serial, deleting the on-disk PEM
-        # mid-session. The in-memory cache keeps rebuilds working through
-        # that gap; InstallCertificate handlers refresh it.
-        self._ca_cert_pem: Optional[str] = None
+        # In-memory union of trusted CA root PEMs, keyed by cert serial.
+        # SSL-context rebuilds (CertificateSigned bounce in
+        # _reconnect_with_new_client_cert, SetNetworkProfile, fallback slot)
+        # concat all entries via _build_trust_anchor_pem() and pass them as
+        # ca_cert_data. Two invariants make this robust to OCTT cert
+        # lifecycle:
+        #   - InstallCertificate(CSMSRootCertificate) ADDS (never replaces)
+        #     so test certs don't kick out the boot anchor that actually
+        #     validates the OCTT TLS endpoint.
+        #   - DeleteCertificate removes the matching entry EXCEPT the
+        #     boot anchor (_boot_ca_serial); the boot anchor stays in
+        #     the union for the life of the daemon so TLS keeps working
+        #     even after OCTT delete-cycles the test certs it installed.
+        self._trust_anchors_pem: Dict[str, str] = {}
+        self._boot_ca_serial: Optional[str] = None
         # TC_M_23_CS: auto-register the station_config CA cert as a
         # CSMSRootCertificate on startup. Without it, GetInstalledCertificateIds
         # returns NotFound and the test ERRORs because OCTT has no target to
@@ -443,9 +449,10 @@ class ChargingStationController:
             try:
                 with open(self._ca_cert, "r", encoding="utf-8") as f:
                     ca_pem = f.read()
-                self._ca_cert_pem = ca_pem
                 hash_data = self._make_cert_hash_data(ca_pem)
                 serial = hash_data["serialNumber"]
+                self._trust_anchors_pem[serial] = ca_pem
+                self._boot_ca_serial = serial
                 if serial not in self.installed_certificates:
                     self.installed_certificates[serial] = {
                         "certificateType": "CSMSRootCertificate",
@@ -874,7 +881,7 @@ class ChargingStationController:
             return
         ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
             profile, self._cert_dir, self._ca_cert,
-            ca_cert_data=self._ca_cert_pem,
+            ca_cert_data=self._build_trust_anchor_pem(),
         )
         new_sp_int = int(profile.get("securityProfile", 0))
         if (
@@ -1584,7 +1591,7 @@ class ChargingStationController:
 
         ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
             profile, self._cert_dir, self._ca_cert,
-            ca_cert_data=self._ca_cert_pem,
+            ca_cert_data=self._build_trust_anchor_pem(),
         )
         # TC_B_45_CS: SetNetworkProfile often omits basicAuth when switching to
         # another slot on the same CSMS root — the station is expected to
@@ -4085,6 +4092,17 @@ class ChargingStationController:
         bs_len, bs_body = _read_len(spki_der, i + 1)
         return spki_der[bs_body + 1:bs_body + bs_len]
 
+    def _build_trust_anchor_pem(self) -> Optional[str]:
+        """Concatenate every entry in self._trust_anchors_pem into a single
+        PEM string suitable for ssl.SSLContext.load_verify_locations(cadata=...).
+
+        Returns None when the union is empty (caller should fall back to the
+        filesystem path or system CA bundle).
+        """
+        if not self._trust_anchors_pem:
+            return None
+        return "".join(self._trust_anchors_pem.values())
+
     @staticmethod
     def _make_cert_hash_data(pem: str) -> Dict[str, str]:
         """Compute RFC 6960 OCSP-style hash data for a certificate.
@@ -4251,13 +4269,17 @@ class ChargingStationController:
             "pem_path":           cert_path,
         }
         save_installed_certificates(self.installed_certificates)
-        # TC_M_23_CS: refresh the in-memory CA trust anchor when OCTT
-        # installs a new CSMSRootCertificate. Subsequent SSL-context
-        # rebuilds (CertificateSigned bounce, SetNetworkProfile) will
-        # use this PEM and remain valid even if OCTT later deletes the
-        # on-disk file in the same test sequence.
+        # TC_M_23_CS: track new CSMS root certs as additional trust anchors
+        # WITHOUT replacing the boot CA. An earlier version of this fix
+        # overwrote a single _ca_cert_pem field on every install, which let
+        # an M_17/M_20 test cert evict the real OCTT TLS chain root that
+        # boot loaded — the subsequent M_23 reconnect then failed with
+        # "unable to get local issuer certificate". The union dict keeps
+        # both the boot anchor and every InstallCertificate'd root in trust
+        # so the SSL rebuild validates the actual server cert regardless
+        # of which test certs were installed in earlier cases.
         if cert_type == "CSMSRootCertificate":
-            self._ca_cert_pem = pem
+            self._trust_anchors_pem[serial] = pem
         logger.info(f"InstallCertificate: type={cert_type} serial={serial} path={cert_path}")
         return {"status": "Accepted"}
 
@@ -4306,6 +4328,12 @@ class ChargingStationController:
 
         del self.installed_certificates[serial]
         save_installed_certificates(self.installed_certificates)
+        # Mirror in the in-memory trust-anchor union — except for the boot
+        # anchor, which must keep validating the OCTT TLS endpoint for the
+        # life of the daemon even if OCTT delete-cycles test certs it
+        # InstallCertificate'd earlier in the run.
+        if serial != self._boot_ca_serial:
+            self._trust_anchors_pem.pop(serial, None)
         logger.info(f"DeleteCertificate: removed serial={serial}")
         return {"status": "Accepted"}
 
@@ -4451,7 +4479,7 @@ class ChargingStationController:
                 }
                 ws_kwargs = StationConfig.build_ws_kwargs_from_profile(
                     profile, self._cert_dir, self._ca_cert,
-                    ca_cert_data=self._ca_cert_pem,
+                    ca_cert_data=self._build_trust_anchor_pem(),
                 )
                 self.ocpp_client.update_connection(current_url, ws_kwargs)
                 logger.info("New client cert installed — bouncing WS to reconnect with it")

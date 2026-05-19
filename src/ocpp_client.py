@@ -448,47 +448,53 @@ class OCPPClient:
                     wait_time = wait_min
                     attempt = -1  # incremented to 0 at end of except block
                 elif is_cert_error and not self._cert_error_retry_done:
-                    # TC_A_05_CS round 2: OCTT keeps the bad CSMS cert in
-                    # place for only ~3s and then reverts. attempt=1 →
-                    # step=1 → wait_min*2 (=180s with wait_min=90) misses
-                    # the ~95s recovery window before OCTT times out. One
-                    # shot wait=0 so the next handshake lands with the
-                    # restored valid cert; subsequent persistent cert
-                    # failures still fall through to exponential backoff.
+                    # TC_A_05_CS first observed cert error: one-shot wait=0
+                    # so the next handshake lands with the restored valid
+                    # cert. Also (re)arm the fast-retry burst window — if
+                    # more cert errors follow they fall into the extension
+                    # branch below instead of the exponential else.
                     self._cert_error_retry_done = True
                     wait_time = 0
+                    self._fast_retry_until = max(
+                        self._fast_retry_until, time.monotonic() + 10.0
+                    )
                 elif (
                     is_clean_drop
                     and attempt == 0
                     and self._should_fast_retry_on_clean_drop()
                 ):
                     # TC_A_05_CS round 1: CSMS swaps its server cert to an
-                    # invalid one and cleanly closes the WS; the bad-cert
-                    # window is only ~3s, so the very first retry must land
-                    # inside it for the cert_error branch above to fire on
-                    # the FOLLOWING attempt. Honouring wait_min here (=90s
-                    # in TC_A_05 prep) misses the window entirely and the
-                    # CS never observes the bad cert → no
+                    # invalid one and cleanly closes the WS, then expects
+                    # the CS to attempt a connect inside the bad-cert
+                    # phase. Honouring wait_min here (=90s) misses the
+                    # window entirely → cert error never observed → no
                     # SecurityEventNotification → test fails.
                     #
-                    # Controller's provider narrows this to the TC_A_05
-                    # scenario by checking OfflineThreshold > wait_min.
-                    # TC_B_51_CS sets OfflineThreshold=62 ≤ wait_min=64 so
-                    # the predicate returns False → falls through to the
-                    # spec-compliant else branch and waits wait_min.
+                    # _should_fast_retry_on_clean_drop narrows this to the
+                    # cert-recovery pattern (drop <10s after a fresh
+                    # connect). TC_B_51 / TC_B_52 close after long prep
+                    # phases, predicate returns False, falls through to
+                    # the spec-compliant else branch.
                     wait_time = 0
                     self._fast_retry_until = time.monotonic() + 10.0
+                elif is_cert_error and time.monotonic() < self._fast_retry_until:
+                    # TC_A_05_CS bad-cert phase observed in the wild has
+                    # varied 3s..~3min between OCTT runs. While cert errors
+                    # keep arriving inside the burst window, extend the
+                    # window so we don't drop to exponential half-way
+                    # through and miss OCTT's revert (board log showed
+                    # attempt 7 → wait 5760s after the original 10s window
+                    # expired). Each cert error refreshes the window by
+                    # 10s; once the bad cert lifts the next retry connects
+                    # cleanly and resets all state.
+                    wait_time = 1
+                    self._fast_retry_until = time.monotonic() + 10.0
                 elif time.monotonic() < self._fast_retry_until:
-                    # TC_A_05_CS retry-burst: OCTT closes, switches to the
-                    # bad-cert keystore (~30ms), and the first CS retry
-                    # often hits the brief gap with ECONNREFUSED before the
-                    # new TLS listener binds. Without this window the next
-                    # attempt falls into the exponential else branch and
-                    # waits wait_min*2 = 180s — well past OCTT's 3s window
-                    # → cert error never observed → no
-                    # SecurityEventNotification. Stay at 1s retries until
-                    # either a successful connect resets the window or it
-                    # naturally expires.
+                    # Non-cert failures within the burst window (OSError
+                    # while OCTT is still binding the bad-cert listener,
+                    # etc.). Stay at 1s retries; do not extend so genuine
+                    # network problems don't get stuck in fast-retry
+                    # forever.
                     wait_time = 1
                 elif self._tls_protocol_retry_done:
                     # TC_A_06_CS Phase 2 robustness: once we've had a TLS

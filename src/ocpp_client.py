@@ -433,12 +433,14 @@ class OCPPClient:
                     if self._consecutive_failures == 0:
                         attempt = 0
                 wait_min, random_range, repeat_times = self._retry_config()
+                _branch = "?"
                 if self._skip_next_reconnect_wait:
                     # TC_A_06_CS / TC_A_11_CS: CS-initiated disconnect (Reset
                     # or post-cert-renewal swap) → reconnect immediately.
                     # Only set by code paths that own the close.
                     self._skip_next_reconnect_wait = False
                     wait_time = 0
+                    _branch = "skip_next"
                 elif is_tls_protocol_error and not self._tls_protocol_retry_done:
                     # TC_A_06_CS: one-shot retry at exactly wait_min after a
                     # TLS-protocol-version rejection. Bypasses the doubled
@@ -463,6 +465,7 @@ class OCPPClient:
                     self._tls_protocol_retry_done = True
                     wait_time = wait_min
                     attempt = -1  # incremented to 0 at end of except block
+                    _branch = "tls_proto_one_shot"
                 elif is_cert_error and not self._cert_error_retry_done:
                     # TC_A_05_CS first observed cert error: one-shot wait=0
                     # so the next handshake lands with the restored valid
@@ -474,6 +477,7 @@ class OCPPClient:
                     self._fast_retry_until = max(
                         self._fast_retry_until, time.monotonic() + 10.0
                     )
+                    _branch = "cert_err_one_shot"
                 elif (
                     is_clean_drop
                     and attempt == 0
@@ -493,6 +497,7 @@ class OCPPClient:
                     # the spec-compliant else branch.
                     wait_time = 0
                     self._fast_retry_until = time.monotonic() + 10.0
+                    _branch = "clean_drop_fast"
                 elif is_cert_error and time.monotonic() < self._fast_retry_until:
                     # TC_A_05_CS bad-cert phase observed in the wild has
                     # varied 3s..~3min between OCTT runs. While cert errors
@@ -505,6 +510,7 @@ class OCPPClient:
                     # cleanly and resets all state.
                     wait_time = 1
                     self._fast_retry_until = time.monotonic() + 10.0
+                    _branch = "cert_err_burst"
                 elif time.monotonic() < self._fast_retry_until:
                     # Non-cert failures within the burst window (OSError
                     # while OCTT is still binding the bad-cert listener,
@@ -512,6 +518,7 @@ class OCPPClient:
                     # network problems don't get stuck in fast-retry
                     # forever.
                     wait_time = 1
+                    _branch = "in_burst_window"
                 elif self._tls_protocol_retry_done:
                     # TC_A_06_CS Phase 2 robustness: once we've had a TLS
                     # protocol-version rejection and haven't successfully
@@ -526,6 +533,7 @@ class OCPPClient:
                     # exponential after a fresh failure round (the next
                     # time tls_protocol_retry_done is re-armed).
                     wait_time = wait_min
+                    _branch = "tls_proto_stable"
                 else:
                     # OCPP 2.0.1: every unsuccessful retry doubles the wait
                     # up to RetryBackOffRepeatTimes. Applies uniformly to
@@ -546,7 +554,20 @@ class OCPPClient:
                         wait_min * (2 ** step)
                         + (random.randint(0, random_range) if random_range > 0 else 0)
                     )
-                logger.info(f"Reconnecting in {wait_time}s (attempt {attempt + 1})...")
+                # _branch tags the wait-selection branch so journal trails
+                # can show why a particular wait_time was picked. Useful
+                # when wait=0 fires unexpectedly (TC_B_52 observed this).
+                _ce = (time.monotonic() - self._last_cert_error_time
+                       if self._last_cert_error_time > 0 else -1)
+                _ca = (time.monotonic() - self._last_connect_time
+                       if self._last_connect_time > 0 else -1)
+                _w = self._fast_retry_until - time.monotonic()
+                logger.info(
+                    f"Reconnecting in {wait_time}s (attempt {attempt + 1}, "
+                    f"branch={_branch}, clean_drop={is_clean_drop}, "
+                    f"cert_err={is_cert_error}, conn_age={_ca:.1f}s, "
+                    f"cert_age={_ce:.1f}s, frt_left={_w:.1f}s)..."
+                )
                 if wait_time > 0:
                     await asyncio.sleep(wait_time)
                 attempt += 1

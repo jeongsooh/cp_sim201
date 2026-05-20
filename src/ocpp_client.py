@@ -106,6 +106,12 @@ class OCPPClient:
         # long-lived connection (TC_B_51 / TC_B_52 prep + offline test)
         # is the spec-compliant wait_min case.
         self._last_connect_time: float = 0.0
+        # TC_B_57_CS distinction: TC_B_57's back-to-back disconnect probe also
+        # has connection_age < 10s but is NOT a cert-recovery context — it
+        # explicitly verifies wait_min is honoured. _last_connect_time alone
+        # can't tell them apart. Adding "was there a cert error recently?"
+        # narrows fast retry to the actual TC_A_05 pattern.
+        self._last_cert_error_time: float = 0.0
         self._schemas = self._load_schemas()
         self.offline_queue = OfflineMessageQueue()
         self.tls_cert_error_occurred = False
@@ -265,14 +271,20 @@ class OCPPClient:
     def _should_fast_retry_on_clean_drop(self) -> bool:
         """Decide whether the first reconnect after a clean WS close should
         be immediate (TC_A_05 cert-recovery context) or honour wait_min
-        (TC_B_51 / TC_B_52 offline-period tests).
+        (TC_B_51 / TC_B_52 offline-period tests, TC_B_57 back-to-back probe).
 
-        Heuristic: a clean drop within 10s of the most recent successful
-        connect is treated as cert-recovery. The OCTT cert-flow pattern is
-        "connect → wait 2s → close → swap cert → wait reconnect inside ~3s
-        window", so the close lands ~2s after a fresh connect. Test-driven
-        offline-period closes (TC_B_51/52) always fire after a long prep
-        phase, so the connection has been alive ≥ tens of seconds.
+        Heuristic — fast retry requires BOTH:
+        - connection_age < 10s: the close came right after a fresh connect
+          (TC_A_05 second close pattern, OCTT swaps cert ~2s after the
+          intermediate reconnect)
+        - last cert error < 10s ago: we're in active cert-recovery context.
+          Without this, TC_B_57's back-to-back probe (also short-lived
+          connection but no cert errors) would falsely trigger fast retry
+          and break the wait_min verification.
+
+        Both must be true together. Long-lived stable connection (TC_B_51/52)
+        fails the first check. Short-lived without cert history (TC_B_57)
+        fails the second. Only the cert-recovery sequence satisfies both.
 
         An optional provider can override this — controller wires None by
         default which leaves the heuristic in charge.
@@ -285,9 +297,12 @@ class OCPPClient:
                     f"clean_drop_fast_retry_provider failed, falling back "
                     f"to connection-age heuristic: {e}"
                 )
-        if self._last_connect_time <= 0.0:
+        if self._last_connect_time <= 0.0 or self._last_cert_error_time <= 0.0:
             return False
-        return (time.monotonic() - self._last_connect_time) < 10.0
+        now = time.monotonic()
+        connection_age = now - self._last_connect_time
+        cert_error_age = now - self._last_cert_error_time
+        return connection_age < 10.0 and cert_error_age < 10.0
 
     def _retry_config(self) -> Tuple[int, int, int]:
         if self._retry_config_provider is not None:
@@ -347,6 +362,7 @@ class OCPPClient:
                 )
                 if is_cert_error:
                     self.tls_cert_error_occurred = True
+                    self._last_cert_error_time = time.monotonic()
                 # TC_A_06_CS: TLS-protocol-version errors are logged for
                 # diagnostics but no longer get a special fast-retry path.
                 # OCTT's TLSv1.1 phase is fixed ~65s; the spec-mandated

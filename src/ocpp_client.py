@@ -73,7 +73,18 @@ class OCPPClient:
         # attempts, not intentional cycle-the-connection cases. The
         # controller sets this just before ws.close(); the connect loop
         # consumes it on the next iteration.
-        self._skip_next_reconnect_wait: bool = False
+        #
+        # TC_B_51_CS leak guard (2026-05-20): observed in the wild a path
+        # where the flag is set but the intended ws.close() never fires
+        # (race between handle_reset_request flag-arm and OCTT's own
+        # close, or _execute_reset's apply_active_network_profile
+        # exception path). The flag then leaks until the NEXT disconnect
+        # (could be many minutes later) and inappropriately collapses
+        # that unrelated reconnect's wait_min to 0. We track the set
+        # timestamp via the property setter and treat the flag as stale
+        # (ignored) if consumed >10s after it was set — legitimate
+        # close fires within ~1s of the setter.
+        self._skip_next_reconnect_wait_at: float = 0.0
         # TC_A_06_CS: one-shot bounded retry on a TLS-protocol-version error.
         # After the first SSL/TLS-version rejection, fire the next attempt
         # at exactly wait_min (not 0, not wait_min*2). Today's OCTT runs a
@@ -134,6 +145,41 @@ class OCPPClient:
         hook: Callable[[str, Dict[str, Any], Dict[str, Any]], Awaitable[None]],
     ) -> None:
         self._replay_response_hook = hook
+
+    # TC_B_51_CS leak guard: expose _skip_next_reconnect_wait as a property
+    # whose setter records the set timestamp. Reading returns a bool so the
+    # existing usage `if self._skip_next_reconnect_wait:` still works. The
+    # connect-loop consume site checks the timestamp to ignore stale flags.
+    @property
+    def _skip_next_reconnect_wait(self) -> bool:
+        return self._skip_next_reconnect_wait_at > 0.0
+
+    @_skip_next_reconnect_wait.setter
+    def _skip_next_reconnect_wait(self, value: bool) -> None:
+        if value:
+            self._skip_next_reconnect_wait_at = time.monotonic()
+        else:
+            self._skip_next_reconnect_wait_at = 0.0
+
+    def _consume_skip_next_reconnect_wait(self) -> bool:
+        """Return True iff the flag was set within the last 10s (so the
+        wait=0 fast path should apply). Always clears the flag.
+
+        Stale flags (set >10s ago) indicate the close the setter expected
+        never fired — flag leaked to an unrelated future disconnect.
+        Ignore them so we don't break wait_min for tests like TC_B_51.
+        """
+        if not self._skip_next_reconnect_wait:
+            return False
+        elapsed = time.monotonic() - self._skip_next_reconnect_wait_at
+        self._skip_next_reconnect_wait = False
+        if elapsed > 10.0:
+            logger.warning(
+                f"_skip_next_reconnect_wait stale ({elapsed:.1f}s old) — "
+                f"the close the setter expected never fired; ignoring."
+            )
+            return False
+        return True
 
     def _load_schemas(self) -> Dict[str, dict]:
         schema_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schemas")
@@ -337,6 +383,12 @@ class OCPPClient:
                 self._cert_error_retry_done = False
                 self._fast_retry_until = 0.0
                 self._last_connect_time = time.monotonic()
+                # TC_B_51_CS leak guard: on a fresh successful connect, no
+                # CS-initiated close is pending — anything still set is
+                # leftover from a previous epoch whose intended close
+                # never materialized. Stomp it so the next clean drop
+                # honours wait_min (not 0).
+                self._skip_next_reconnect_wait = False
                 if self._on_connect_callback:
                     asyncio.create_task(self._on_connect_callback())
                 # G4: 재연결 직후 오프라인 큐 재전송
@@ -434,11 +486,12 @@ class OCPPClient:
                         attempt = 0
                 wait_min, random_range, repeat_times = self._retry_config()
                 _branch = "?"
-                if self._skip_next_reconnect_wait:
+                if self._consume_skip_next_reconnect_wait():
                     # TC_A_06_CS / TC_A_11_CS: CS-initiated disconnect (Reset
                     # or post-cert-renewal swap) → reconnect immediately.
-                    # Only set by code paths that own the close.
-                    self._skip_next_reconnect_wait = False
+                    # The helper clears the flag and validates the setter
+                    # timestamp (stale leaks beyond 10s are ignored — see
+                    # TC_B_51_CS leak guard in __init__).
                     wait_time = 0
                     _branch = "skip_next"
                 elif is_tls_protocol_error and not self._tls_protocol_retry_done:

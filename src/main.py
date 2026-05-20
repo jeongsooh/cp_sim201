@@ -169,10 +169,21 @@ async def proximity_monitor(controller: ChargingStationController) -> None:
 async def cp_adc_monitor(controller: ChargingStationController) -> None:
     """
     Background daemon to scan ADC Channel 0 for State C transitions (+6V).
-    State A: ~53000 | State B: ~45000 | State C: ~36500
+
+    Board-measured calibration (cp700p / iio:device2 / in_voltage0_raw):
+      State A (12V, idle):       ADC ≈ 59,100 (spikes to ~61,100)
+      State B (9V, cable):       ADC ≈ 51,500 (spikes to ~53,300)
+      State C (6V, charging):    ADC ≈ 44,300 (spikes to ~45,700)
+    Linear slope ≈ 2,475 ADC/V, offset ≈ 29,300 (verified across 600 samples).
+    The previous reference values in this comment (A~53000 / B~45000 /
+    C~36500) were inherited from a different board and never matched our
+    iio:device2 readings — threshold=40000 sat below State C's actual
+    range, so cp_adc_monitor never fired even with a 6V CP signal.
     """
     logger.info("Starting CP ADC monitor daemon (Polling in_voltage0_raw)")
-    state_c_threshold = 40000
+    # Midpoint between State B floor (51,470) and State C ceiling (~45,700)
+    # gives the largest safety margin against either-side spikes.
+    state_c_threshold = 48000
     
     while True:
         try:

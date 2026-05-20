@@ -3010,15 +3010,27 @@ class ChargingStationController:
                     self._tx_group_id_token_value = group_id
                     self.power_contactor_hal.control_relay("Close")
                     await self._send_tx_updated("Authorized", id_token=id_token)
-                    # ChargingStateChanged=Charging is emitted by handle_state_c
-                    # when cp_adc_monitor observes the actual CP State-C dip
-                    # (EV pulling current). Driving it from software here was
-                    # tried in 26aa9fa for TC_J_07_CS but reverted: an
-                    # unconditional software emit fires Charging in scenarios
-                    # the spec wants silent — e.g. CSMS-rejected idToken on
-                    # the Started response where _handle_tx_auth_rejection
-                    # still sees is_authorized=True. Keep the real ADC dip
-                    # as the single source of truth for charging state.
+                    # TC_C_42_CS / TC_J_07_CS: OCTT's virtual EV does not drive
+                    # CP to State C deterministically (see project_j1772_sim_
+                    # state_c memory), so cp_adc_monitor never fires
+                    # handle_state_c and ChargingStateChanged=Charging never
+                    # gets sent → OCTT times out waiting for it.
+                    #
+                    # The 0687560 revert of 26aa9fa worried about a race with
+                    # TC_C_17_CS's rejected-idToken Updated response, but
+                    # _send_tx_updated above is AWAITED and synchronously
+                    # processes the response: if idTokenInfo.status != Accepted
+                    # it calls _handle_tx_auth_rejection (also awaited at
+                    # line 3261), which either ends the tx (clears
+                    # transaction_id) or suspends with is_authorized=False.
+                    # By the time control reaches this point, the rejection
+                    # path has already executed.
+                    #
+                    # handle_state_c's own guard re-checks transaction_id AND
+                    # is_authorized AND _cable_plug_event_sent before emitting,
+                    # so any rejection cleanup naturally suppresses the
+                    # Charging event. Re-introduce the software drive.
+                    await self.handle_state_c()
             else:
                 # TC_C_02_CS / TC_C_07_CS: per OCPP 2.0.1 §C02, when Authorize
                 # is rejected (Expired / Invalid / Unknown / Blocked ...) the
